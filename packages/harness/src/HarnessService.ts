@@ -27,6 +27,7 @@ import {
   type PendingView,
   type PipelineEvent,
   type ProvisionalErrorCode,
+  type LlmClient,
   type SensorAssessment,
   type SourceRef,
   type TaskRef,
@@ -34,6 +35,7 @@ import {
 import { StoreDispatchOwner } from './dispatch/DispatchOwner.js';
 import { reviewFacts, type ReviewFacts } from './facts.js';
 import { RuleBasedGuide, type Guide, type GuideFacts } from './guide/Guide.js';
+import { LlmGuide, RuleFirstGuide } from './guide/LlmGuide.js';
 import { DEFAULT_POLICY, type PolicyConfig } from './policy/config.js';
 import { expectedOutcomeFor } from './policy/expectedOutcome.js';
 import { classifyAnswer } from './policy/inputPolicy.js';
@@ -59,6 +61,8 @@ export interface HarnessDeps {
   ids: IdGen;
   config?: PolicyConfig;
   guide?: Guide;
+  /** 있으면 규칙 Guide가 모르는 의도에 LLM 보조 Guide를 쓴다 (RuleFirstGuide). guide를 직접 주면 무시한다 */
+  llm?: LlmClient;
   sensor?: Sensor;
   wiki?: WikiReader;
   holderId?: string;
@@ -88,6 +92,9 @@ interface RequestMeta {
 
 const WRITE_RETRYABLE: ReadonlySet<ProvisionalErrorCode> = new Set(['GITHUB_TRANSIENT', 'EUREKA_TRANSIENT']);
 
+/** 쓰기 실행 결과. 센서 자체 오류면 확정 ActionResult 없이 판정 대기(assessment=pending)로 끝난다 */
+type WriteOutcome = { actionResult: ActionResult; operation: OperationRecord } | { assessmentPending: true; operation: OperationRecord };
+
 export class HarnessService {
   private readonly cfg: PolicyConfig;
   private readonly guide: Guide;
@@ -98,7 +105,7 @@ export class HarnessService {
 
   constructor(private readonly d: HarnessDeps) {
     this.cfg = d.config ?? DEFAULT_POLICY;
-    this.guide = d.guide ?? new RuleBasedGuide(this.cfg);
+    this.guide = d.guide ?? new RuleFirstGuide(new RuleBasedGuide(this.cfg), d.llm ? new LlmGuide(d.llm, { now: () => d.clock.nowMs(), timeoutMs: this.cfg.llmGuideTimeoutMs }) : undefined);
     this.sensor = d.sensor ?? new DeterministicSensor();
     this.holderId = d.holderId ?? 'harness-1';
     this.owner = new StoreDispatchOwner(d.store, d.clock, this.holderId, (op) => this.dispatchValidity(op));
@@ -296,6 +303,28 @@ export class HarnessService {
 
   // ================================================================== reconcile
   /** 기존 결과 조회로만 복구한다. 쓰기를 실행하지 않는다. 동시에 하나의 복구 담당만 허용한다. */
+  /**
+   * 판정 대기(assessment=pending) operation의 센서 재검사. 외부 호출·재전송을 하지 않고 저장된 응답 증거만 다시 판정한다.
+   * 판정되면 일반 경로와 같이 ActionResult를 확정한다. unknown이면 recovery=needed로 읽기 복구 대상이 된다.
+   * 한계(MVP): 재검사로 승인이 성공 판정돼도 Eureka 후속 질문은 자동으로 시작하지 않는다.
+   */
+  async reassess(operationId: string, systemRequestId: string): Promise<{ status: 'assessed' | 'still_pending' | 'not_needed'; actionResult?: ActionResult }> {
+    const op = await this.d.store.getOperation(operationId);
+    if (!op || op.assessment !== 'pending' || op.currentExecutionAuthority) return { status: 'not_needed', ...(op?.actionResult ? { actionResult: op.actionResult } : {}) };
+    const last = op.attempts[op.attempts.length - 1]!;
+    const resp = (last.responseEvidence ?? {}) as Record<string, unknown>;
+    const g = resp['gatewayResult'] as GatewayResult | undefined;
+    if (!g) return { status: 'still_pending' };
+    const prior = (resp['priorEvidenceForAssessment'] as Record<string, unknown> | undefined) ?? op.priorEvidence;
+    const inspected = this.inspect({ requestId: systemRequestId, cancelled: false }, op, g, prior);
+    if (!inspected.ok) return { status: 'still_pending' };
+    const status = inspected.assessment.suggestedActionStatus ?? (isWriteAction(op.action) ? 'unknown' : 'failed');
+    const ar = this.toActionResult(op, inspected.assessment, g, status);
+    const recovery = isWriteAction(op.action) && (op.recovery === 'none' || op.recovery === 'needed') ? { recovery: status === 'unknown' ? ('needed' as const) : ('none' as const) } : {};
+    const after = await this.d.store.appendEvidence(op.operationId, { attemptId: last.attemptId, assessment: 'assessed', actionResult: ar, ...recovery });
+    return { status: 'assessed', actionResult: after.actionResult! };
+  }
+
   async reconcile(operationId: string, systemRequestId: string, constraints: { deadlineAt: string }): Promise<{ status: 'resolved' | 'still_unknown' | 'busy' | 'not_needed'; actionResult?: ActionResult; recovery?: string }> {
     const op = await this.d.store.getOperation(operationId);
     if (!op || op.recovery !== 'needed') return { status: 'not_needed', ...(op?.actionResult ? { actionResult: op.actionResult } : {}) };
@@ -337,17 +366,13 @@ export class HarnessService {
       void e;
       return { status: 'still_unknown', recovery: after.recovery, ...(after.actionResult ? { actionResult: after.actionResult } : {}) };
     }
-    const assessment = this.sensor.inspect({
-      requestId: systemRequestId,
-      operationId: op.operationId,
-      attemptId: last.attemptId,
-      executionRevision: op.revision,
-      expectedOutcome: op.expectedOutcome,
-      actualRequest: op.actualRequest,
-      gatewayResult: g,
-      priorEvidence,
-      executionContext: { cancelled: false, expired: false },
-    });
+    const inspected = this.inspect({ requestId: systemRequestId, cancelled: false }, op, g, priorEvidence);
+    if (!inspected.ok) {
+      // 센서 오류는 복구 실패로 보지 않는다. 복구 담당을 반드시 해제하고 외부 결과 불명 상태를 유지한다
+      const after = await this.d.store.releaseRecovery(op.operationId, holder, 'still_unknown');
+      return { status: 'still_unknown', recovery: after.recovery, ...(after.actionResult ? { actionResult: after.actionResult } : {}) };
+    }
+    const assessment = inspected.assessment;
     if (assessment.verdict === 'confirmed_success' || assessment.verdict === 'confirmed_failure') {
       const ar = this.toActionResult(op, assessment, { ...g, dispatchState: op.actionResult?.dispatchState ?? 'may_have_been_sent' }, assessment.suggestedActionStatus!);
       await this.d.store.appendEvidence(op.operationId, { attemptId: last.attemptId, actionResult: ar, assessment: 'assessed' });
@@ -382,7 +407,7 @@ export class HarnessService {
 
       let decision: GuideDecision;
       try {
-        decision = this.guide.proposeNext({
+        decision = await this.guide.proposeNext({
           requestId: meta.requestId,
           turnId: turn.turnId,
           stateRevision: meta.stateRevision,
@@ -410,8 +435,10 @@ export class HarnessService {
             return this.result(meta, 'failed', actionResults, exportFacts(facts), { errors: [errorInfo('harness.guide', 'POLICY_BLOCKED', `action ${a.action} not allowed from guide`, 'none')], sources });
           }
           const { actionResult, review, error } = await this.executeReview(meta, a, constraints, meta.intent === 'pr.approve' ? 'approval_precheck' : 'review');
-          actionResults.push(actionResult);
-          sources.push({ kind: 'github', ref: `${a.repository.owner}/${a.repository.name}#${a.prNumber}`, observedAt: actionResult.observedAt });
+          if (actionResult) {
+            actionResults.push(actionResult);
+            sources.push({ kind: 'github', ref: `${a.repository.owner}/${a.repository.name}#${a.prNumber}`, observedAt: actionResult.observedAt });
+          }
           if (review) facts.review = review;
           else facts.reviewError = error ?? 'review_read_failed';
           meta.stateRevision += 1;
@@ -441,7 +468,7 @@ export class HarnessService {
           return this.result(meta, 'awaiting_user', actionResults, { ...exportFacts(facts), question: { ...questionFacts(view), ...(ctx.target ? { target: ctx.target } : {}) }, ...(decision.reasonRefs.length ? { questionReasons: decision.reasonRefs } : {}) }, { pending: view, sources });
         }
         case 'blocked':
-          return this.result(meta, 'completed', actionResults, { ...exportFacts(facts), blocked: { reasons: decision.payload.unmetConditions, intent: meta.intent } }, { sources });
+          return this.result(meta, 'completed', actionResults, { ...exportFacts(facts), blocked: { reasons: decision.payload.unmetConditions, intent: meta.intent, ...(decision.reasonRefs.length ? { guideRefs: decision.reasonRefs } : {}) } }, { sources });
         case 'finish':
           return this.result(meta, 'completed', actionResults, exportFacts(facts), { sources });
       }
@@ -455,7 +482,7 @@ export class HarnessService {
     a: Extract<import('@deskpet/contracts').ActionArgs, { action: 'get_review_context' }>,
     constraints: ExecutionConstraints,
     purpose: 'review' | 'approval_precheck',
-  ): Promise<{ actionResult: ActionResult; review?: ReviewFacts; error?: string }> {
+  ): Promise<{ actionResult?: ActionResult; review?: ReviewFacts; error?: string }> {
     const target: GitHubPrTarget = { kind: 'github_pr', repository: a.repository, prNumber: a.prNumber };
     const prep = await this.d.store.reserveAndPrepare({
       owner: 'harness',
@@ -490,7 +517,13 @@ export class HarnessService {
       successTextOnly: false,
       ...(ctx.error ? { error: ctx.error } : {}),
     };
-    const assessment = this.inspect(meta, op, g);
+    const inspected = this.inspect(meta, op, g);
+    if (!inspected.ok) {
+      // 판정 대기: 조회 결과를 근거로 쓰지 않는다 (판정 없는 사실로 승인 질문을 만들지 않음)
+      await this.d.store.appendEvidence(op.operationId, this.pendingAssessmentEvidence(op.attempts[0]!.attemptId, g, inspected.diagnostic, op.priorEvidence));
+      return { error: 'sensor_assessment_pending' };
+    }
+    const assessment = inspected.assessment;
     const ar = this.toActionResult(op, assessment, g, assessment.suggestedActionStatus ?? 'failed');
     await this.d.store.appendEvidence(op.operationId, {
       attemptId: op.attempts[0]!.attemptId,
@@ -506,7 +539,9 @@ export class HarnessService {
   private async executeApproval(meta: RequestMeta, op: OperationRecord, authority: ExecutionAuthority, constraints: ExecutionConstraints): Promise<HarnessResult> {
     const t = op.target as GitHubPrTarget;
     const cmd = { operationId: op.operationId, confirmationId: op.confirmationRef!, repository: t.repository, prNumber: t.prNumber, expectedHeadSha: String(op.actualRequest['commitId']) };
-    const { actionResult, operation } = await this.runWrite(meta, op, authority, constraints, (h) => this.d.github.submitApproval(cmd, h, { deadlineAt: constraints.deadlineAt }));
+    const out = await this.runWrite(meta, op, authority, constraints, (h) => this.d.github.submitApproval(cmd, h, { deadlineAt: constraints.deadlineAt }));
+    if ('assessmentPending' in out) return this.assessmentPendingResult(meta, out.operation);
+    const { actionResult, operation } = out;
     const facts: Record<string, unknown> = {
       approval: {
         status: actionResult.status,
@@ -634,7 +669,9 @@ export class HarnessService {
       githubSuccessEvidence: { approvalOperationId, reviewId: String(ar0['reviewId'] ?? ''), approvedSha, followUpObservedAt: String(ar0['followUpObservedAt'] ?? '') },
       expectedChange: { status: 'done' as const },
     };
-    const { actionResult } = await this.runWrite(meta, op, authority, constraints, (h) => this.d.eureka.completeStage(cmd, h, { deadlineAt: constraints.deadlineAt }));
+    const out = await this.runWrite(meta, op, authority, constraints, (h) => this.d.eureka.completeStage(cmd, h, { deadlineAt: constraints.deadlineAt }));
+    if ('assessmentPending' in out) return this.assessmentPendingResult(meta, out.operation);
+    const { actionResult } = out;
     return this.result(meta, 'completed', [actionResult], {
       stageCompletion: { status: actionResult.status, itemId: t.itemId, stageId: t.stageId, stageName: ar0['stageName'], dispatchState: actionResult.dispatchState },
     });
@@ -651,7 +688,7 @@ export class HarnessService {
     authority0: ExecutionAuthority,
     constraints: ExecutionConstraints,
     call: (h: ReturnType<StoreDispatchOwner['handleFor']>) => Promise<GatewayResult>,
-  ): Promise<{ actionResult: ActionResult; operation: OperationRecord }> {
+  ): Promise<WriteOutcome> {
     let op = op0;
     let authority = authority0;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -662,7 +699,18 @@ export class HarnessService {
         return { actionResult: current.actionResult, operation: current };
       }
       const priorEvidence = { ...current.priorEvidence, ...(g.response?.['priorReviewIds'] ? { priorReviewIds: g.response['priorReviewIds'] } : {}) };
-      const assessment = this.inspect(meta, current, g, priorEvidence);
+      const inspected = this.inspect(meta, current, g, priorEvidence);
+      if (!inspected.ok) {
+        // 센서만 실패: 재전송·재시도·unknown 매핑 없이 판정 대기로 남기고 reassess()로 재검사한다.
+        // 응답 없이 전송됐을 수 있으면 외부 결과 확인(읽기 복구)도 필요하다
+        const noResponse = g.outcome !== 'response' && g.dispatchState !== 'not_sent';
+        op = await this.d.store.appendEvidence(current.operationId, {
+          ...this.pendingAssessmentEvidence(authority.attemptId, g, inspected.diagnostic, priorEvidence),
+          ...(noResponse ? { recovery: 'needed' as const } : {}),
+        });
+        return { assessmentPending: true, operation: op };
+      }
+      const assessment = inspected.assessment;
       const status = assessment.suggestedActionStatus ?? 'unknown';
       const ar = this.toActionResult(current, assessment, g, status);
       const retryable = g.dispatchState === 'not_sent' && !!g.notSentProof && !!g.error && WRITE_RETRYABLE.has(g.error.provisionalCode);
@@ -692,6 +740,20 @@ export class HarnessService {
       return { actionResult: ar, operation: op };
     }
     return { actionResult: op.actionResult!, operation: op };
+  }
+
+  /** 판정 대기 응답: 성공·실패·불명을 말하지 않고 판정이 끝나지 않았다는 사실만 돌려준다 */
+  private assessmentPendingResult(meta: RequestMeta, op: OperationRecord): HarnessResult {
+    const last = op.attempts[op.attempts.length - 1];
+    return this.result(meta, 'completed', [], {
+      assessmentPending: {
+        operationId: op.operationId,
+        action: op.action,
+        target: op.target,
+        dispatchState: last?.dispatchState ?? 'unknown',
+        recovery: op.recovery,
+      },
+    });
   }
 
   /** beforeDispatch 재검사: 취소·deadline·확인 유효성 */
@@ -800,10 +862,19 @@ export class HarnessService {
     return this.result(meta, 'completed', [], { answerNotAccepted: reason, pendingState: pending?.state });
   }
 
-  private inspect(meta: RequestMeta, op: OperationRecord, g: GatewayResult, priorEvidence = op.priorEvidence): SensorAssessment {
+  /**
+   * Sensor 호출. 센서 자체 오류는 판정을 만들지 않는다 (guide-sensor: suggestedActionStatus 미생성, assessment=pending).
+   * 외부 결과 불명(unknown)과 판정 대기를 구분하기 위해 오류를 별도 값으로 돌려준다.
+   */
+  private inspect(
+    ctx: { requestId: string; cancelled: boolean },
+    op: OperationRecord,
+    g: GatewayResult,
+    priorEvidence = op.priorEvidence,
+  ): { ok: true; assessment: SensorAssessment } | { ok: false; diagnostic: string } {
     try {
-      return this.sensor.inspect({
-        requestId: meta.requestId,
+      const assessment = this.sensor.inspect({
+        requestId: ctx.requestId,
         operationId: op.operationId,
         attemptId: op.attempts[op.attempts.length - 1]!.attemptId,
         executionRevision: op.revision,
@@ -811,24 +882,24 @@ export class HarnessService {
         actualRequest: op.actualRequest,
         gatewayResult: g,
         priorEvidence,
-        executionContext: { cancelled: meta.cancelled, expired: false },
+        executionContext: { cancelled: ctx.cancelled, expired: false },
       });
+      return { ok: true, assessment };
     } catch (e) {
-      // 센서 오류는 외부 실패로 단정하지 않는다: 판정 대기
-      return {
-        assessmentId: `asm-error-${op.operationId}`,
-        operationId: op.operationId,
-        attemptId: op.attempts[op.attempts.length - 1]!.attemptId,
-        basedOnRevision: op.revision,
-        verdict: 'indeterminate',
-        checks: [],
-        confirmedFacts: {},
-        externalRefs: g.externalRefs,
-        suggestedActionStatus: g.mode === 'write' && g.dispatchState !== 'not_sent' ? 'unknown' : 'failed',
-        followUpNeed: 'reconcile',
-        diagnostics: [`sensor error: ${e instanceof Error ? e.message : String(e)}`],
-      };
+      return { ok: false, diagnostic: `sensor error: ${e instanceof Error ? e.message : String(e)}` };
     }
+  }
+
+  /** 판정 대기 기록: 응답 증거(재검사용 GatewayResult 포함)를 남기고 확정 ActionResult는 만들지 않는다 */
+  private pendingAssessmentEvidence(attemptId: string, g: GatewayResult, diagnostic: string, priorEvidence: Record<string, unknown>) {
+    return {
+      attemptId,
+      ...(g.dispatchState === 'not_sent' ? (g.notSentProof ? { attemptDispatchState: 'not_sent' as const, notSentProof: g.notSentProof } : {}) : { attemptDispatchState: g.dispatchState }),
+      responseEvidence: { ...(g.response ?? {}), outcome: g.outcome, successTextOnly: g.successTextOnly, gatewayResult: g as unknown as Record<string, unknown>, priorEvidenceForAssessment: priorEvidence, sensorDiagnostic: diagnostic },
+      phase: g.outcome === 'response' ? ('response_received' as const) : ('stopped' as const),
+      assessment: 'pending' as const,
+      releaseAuthority: true,
+    };
   }
 
   private toActionResult(op: OperationRecord, a: SensorAssessment, g: GatewayResult, status: ActionResult['status']): ActionResult {

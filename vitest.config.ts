@@ -11,6 +11,7 @@ export default defineConfig({
       '@deskpet/gateways': r('./packages/gateways/src/index.ts'),
       '@deskpet/output': r('./packages/output/src/index.ts'),
       '@deskpet/projector': r('./packages/projector/src/index.ts'),
+      '@deskpet/llm': r('./packages/llm/src/index.ts'),
     },
   },
   test: {

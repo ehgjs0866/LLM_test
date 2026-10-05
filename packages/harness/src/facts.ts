@@ -1,4 +1,4 @@
-import { approvalBlockers, type ReviewContext, type ViewerPermission } from '@deskpet/contracts';
+import { approvalBlockers, approvalWarnings, latestRunsByName, type ReviewContext, type ViewerPermission } from '@deskpet/contracts';
 
 /**
  * ReviewContext → 출력용 구조화 사실. 모델 요약으로 원 증거를 대체하지 않는다.
@@ -18,10 +18,18 @@ export interface ReviewFacts {
   changes?: { fileCount: number; additions: number; deletions: number; comparisonBase: string; paths: string[] };
   checks?: {
     requiredState: 'configured' | 'none_configured' | 'unknown';
+    /** configured/none_configured의 출처 (deskpet_config면 GitHub 대신 DeskPet 설정) */
+    requiredSource?: string;
+    /** unknown 이유 또는 대체 설정을 쓴 이유 */
+    requiredReasonCode?: string;
+    requiredReason?: string;
+    requiredPartial?: boolean;
     required: string[];
     runs: { name: string; status: string; conclusion: string | null }[];
     failing: string[];
     pending: string[];
+    /** 같은 이름의 이전 실행으로 판정에서 제외한 수 */
+    duplicateRuns: number;
   };
   copilot?: {
     status: 'current' | 'stale_only' | 'none' | 'unavailable';
@@ -30,6 +38,8 @@ export interface ReviewFacts {
     blockingComments: number;
   };
   approvalBlockers: string[];
+  /** 차단하지 않는 경고 (필수가 아닌 검사 실패·진행 중) */
+  approvalWarnings: string[];
 }
 
 export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): ReviewFacts {
@@ -45,6 +55,7 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
     stoppedBeforeDetails: ctx.stoppedBeforeDetails,
     sections,
     approvalBlockers: [],
+    approvalWarnings: [],
     ...(ctx.prBasics ? { title: ctx.prBasics.title, prState: ctx.prBasics.state, draft: ctx.prBasics.draft } : {}),
     ...(head ? { headSha: head } : {}),
     ...(ctx.observedHeadSha ? { observedHeadSha: ctx.observedHeadSha } : {}),
@@ -62,12 +73,19 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
   const checks = ctx.sections.find((s) => s.sectionKind === 'checks');
   if (checks?.sectionKind === 'checks' && checks.data) {
     const req = checks.data.requiredChecks;
+    const latest = latestRunsByName(checks.data.runs);
     f.checks = {
       requiredState: req.state,
+      ...(req.state !== 'unknown' && req.source ? { requiredSource: req.source } : {}),
+      ...(req.state === 'unknown' && req.reasonCode ? { requiredReasonCode: req.reasonCode } : {}),
+      ...(req.state === 'configured' && req.githubUnavailableReason ? { requiredReasonCode: req.githubUnavailableReason } : {}),
+      ...(req.state === 'unknown' ? { requiredReason: req.reason } : {}),
+      ...(req.state === 'configured' && req.partial ? { requiredPartial: true } : {}),
       required: req.state === 'configured' ? req.names : [],
-      runs: checks.data.runs.map((r) => ({ name: r.name, status: r.status, conclusion: r.conclusion })),
-      failing: checks.data.runs.filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion ?? '')).map((r) => r.name),
-      pending: checks.data.runs.filter((r) => r.status !== 'completed').map((r) => r.name),
+      runs: latest.runs.map((r) => ({ name: r.name, status: r.status, conclusion: r.conclusion })),
+      duplicateRuns: latest.duplicates,
+      failing: latest.runs.filter((r) => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(r.conclusion ?? '')).map((r) => r.name),
+      pending: latest.runs.filter((r) => r.status !== 'completed').map((r) => r.name),
     };
   }
   const reviews = ctx.sections.find((s) => s.sectionKind === 'reviews');
@@ -98,6 +116,7 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
       ...(ctx.viewer ? { viewerLogin: ctx.viewer.login } : {}),
     });
     if (ctx.consistency === 'changed' && !f.approvalBlockers.includes('sha_changed')) f.approvalBlockers.push('sha_changed');
+    f.approvalWarnings = approvalWarnings(checks?.sectionKind === 'checks' ? checks.data : undefined);
   }
   return f;
 }

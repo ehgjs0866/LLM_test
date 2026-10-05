@@ -116,6 +116,12 @@ export interface StoreUsage {
   compactedCount: number;
 }
 
+export interface ProjectionSnapshotRecords {
+  operations: OperationRecord[];
+  pendings: Pending[];
+  confirmations: ConfirmationRecord[];
+}
+
 export interface OperationStore {
   // -- operation 준비·전송 경계
   reserveAndPrepare(cmd: PrepareCommand): Promise<PrepareResult>;
@@ -147,6 +153,8 @@ export interface OperationStore {
   findOperationByConfirmation(confirmationId: string): Promise<OperationRecord | undefined>;
   listOperations(requestId?: string): Promise<OperationRecord[]>;
   getDedupRecord(operationId: string): Promise<MinimumDedupRecord | undefined>;
+  /** 투영 스냅샷용: operation·pending·confirmation을 같은 시점에 한 번에 읽는다 (scope = source 전체) */
+  readProjectionSnapshot(): Promise<ProjectionSnapshotRecords>;
 
   // -- 턴 중복·이벤트 순서
   getTurnResult(turnId: string): Promise<HarnessResult | undefined>;

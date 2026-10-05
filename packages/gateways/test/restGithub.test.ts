@@ -19,7 +19,7 @@ const base = `/repos/${REPO.owner}/${REPO.name}`;
 const golden: Route[] = [
   (u) => (u.pathname === `${base}/pulls/${PR}` ? { status: 200, body: { title: 'feat', user: { login: 'teammate' }, state: 'open', draft: false, merged_at: null, head: { sha: SHA_A }, base: { ref: 'main', sha: 'b'.repeat(40) } } } : undefined),
   (u) => (u.pathname === `${base}/pulls/${PR}/files` ? { status: 200, body: [{ filename: 'a.ts', status: 'modified', additions: 3, deletions: 1 }] } : undefined),
-  (u) => (u.pathname === `${base}/commits/${SHA_A}/check-runs` ? { status: 200, body: { total_count: 1, check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', head_sha: SHA_A }] } } : undefined),
+  (u) => (u.pathname === `${base}/commits/${SHA_A}/check-runs` ? { status: 200, body: { total_count: 1, check_runs: [{ id: 501, name: 'test', status: 'completed', conclusion: 'success', head_sha: SHA_A, started_at: T0, completed_at: T0 }] } } : undefined),
   (u) => (u.pathname === `${base}/branches/main/protection/required_status_checks` ? { status: 200, body: { contexts: ['test'], checks: [{ context: 'test' }] } } : undefined),
   (u) => (u.pathname === `${base}/pulls/${PR}/reviews` ? { status: 200, body: [{ id: 77, user: { login: 'copilot-pull-request-reviewer[bot]' }, state: 'COMMENTED', commit_id: SHA_A, submitted_at: T0, body: 'nit' }] } : undefined),
   (u) => (u.pathname === '/user' ? { status: 200, body: { login: 'gomdori' } } : undefined),
@@ -34,21 +34,59 @@ describe('RestGitHubTransport', () => {
     const ctx = await gw.getReviewContext({ repository: { ...REPO }, prNumber: PR, requestedSections: ['changes', 'checks', 'reviews'], deadlineAt: '2099-01-01T00:00:00.000Z' }, { deadlineAt: '2099-01-01T00:00:00.000Z' });
     expect(ctx.prBasics).toMatchObject({ headSha: SHA_A, state: 'open', author: 'teammate' });
     const checks = ctx.sections.find((s) => s.sectionKind === 'checks');
-    expect(checks?.sectionKind === 'checks' && checks.data!.requiredChecks).toEqual({ state: 'configured', names: ['test'] });
+    expect(checks?.sectionKind === 'checks' && checks.data!.requiredChecks).toEqual({ state: 'configured', names: ['test'], source: 'github_branch_protection' });
     // 파일 API는 SHA 근거가 없으므로 unverified (C-10 / inference)
     expect(ctx.consistency).toBe('unverified');
     expect(ctx.viewer).toEqual({ login: 'gomdori', permission: 'write' });
+    expect(checks?.sectionKind === 'checks' && checks.data!.runs[0]).toMatchObject({ id: '501', startedAt: T0, completedAt: T0 });
     expect(seen.every((s) => s.method === 'GET')).toBe(true);
     expect(seen[0]!.auth).toBe('Bearer tok');
   });
 
-  it('distinguishes unprotected branch from unreadable protection', async () => {
-    const notProtected: Route = (u) => (u.pathname.endsWith('/required_status_checks') ? { status: 404, body: { message: 'Branch not protected' } } : undefined);
-    const t1 = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([notProtected]) });
-    expect(await t1.read({ kind: 'required_checks', repository: { ...REPO }, baseRef: 'main' }, { timeoutMs: 1000 })).toEqual({ state: 'none_configured' });
-    const forbidden: Route = (u) => (u.pathname.endsWith('/required_status_checks') ? { status: 403, body: { message: 'Resource not accessible by integration' } } : undefined);
-    const t2 = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([forbidden]) });
-    await expect(t2.read({ kind: 'required_checks', repository: { ...REPO }, baseRef: 'main' }, { timeoutMs: 1000 })).rejects.toMatchObject({ kind: 'unsupported' });
+  const rc = (t: RestGitHubTransport) => t.read({ kind: 'required_checks', repository: { ...REPO }, baseRef: 'main' }, { timeoutMs: 1000 });
+  const classic = (status: number, body: unknown): Route => (u) => (u.pathname.endsWith('/protection/required_status_checks') ? { status, body } : undefined);
+  const rules = (body: unknown): Route => (u) => (u.pathname.endsWith('/rules/branches/main') ? { status: 200, body } : undefined);
+
+  it('unprotected branch → none_configured (confirmed absence)', async () => {
+    const t = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([classic(404, { message: 'Branch not protected' })]) });
+    expect(await rc(t)).toEqual({ state: 'none_configured', source: 'github_branch_protection' });
+  });
+
+  it('free-plan private repo → unavailable with plan_unsupported (not none_configured)', async () => {
+    const msg = { message: 'Upgrade to GitHub Pro or make this repository public to enable this feature.' };
+    const t = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([classic(403, msg)]) });
+    expect(await rc(t)).toMatchObject({ state: 'unavailable', reasonCode: 'plan_unsupported' });
+  });
+
+  it('other 403 → insufficient_permission', async () => {
+    const t = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([classic(403, { message: 'Resource not accessible by integration' })]) });
+    expect(await rc(t)).toMatchObject({ state: 'unavailable', reasonCode: 'insufficient_permission' });
+  });
+
+  it('rulesets readable without admin; partial when classic protection is unreadable', async () => {
+    const r = rules([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test' }] } }, { type: 'pull_request' }]);
+    const t1 = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([r, classic(404, { message: 'Branch not protected' })]) });
+    expect(await rc(t1)).toEqual({ state: 'configured', names: ['test'], source: 'github_rulesets' });
+    const t2 = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([r, classic(403, { message: 'Must have admin rights' })]) });
+    expect(await rc(t2)).toMatchObject({ state: 'configured', names: ['test'], partial: true, githubUnavailableReason: 'insufficient_permission' });
+    const t3 = new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([r, classic(200, { contexts: ['build'] })]) });
+    expect(await rc(t3)).toMatchObject({ state: 'configured', names: ['build', 'test'], source: 'github_mixed' });
+  });
+
+  it('gateway uses the DeskPet fallback only for plan_unsupported', async () => {
+    const plan = classic(403, { message: 'Upgrade to GitHub Pro or make this repository public to enable this feature.' });
+    const mk = (route: Route) =>
+      new GitHubReviewGateway({
+        transport: new RestGitHubTransport({ token: 'x', fetchImpl: fakeFetch([route, ...golden.filter((_, i) => i !== 3)]) }),
+        now: () => Date.parse(T0),
+        requiredChecksFallback: { 'newline/deskpet': ['test'] },
+      });
+    const q = { repository: { ...REPO }, prNumber: PR, requestedSections: ['checks' as const], deadlineAt: '2099-01-01T00:00:00.000Z' };
+    const c = { deadlineAt: '2099-01-01T00:00:00.000Z' };
+    const a = (await mk(plan).getReviewContext(q, c)).sections.find((s) => s.sectionKind === 'checks');
+    expect(a?.sectionKind === 'checks' && a.data!.requiredChecks).toEqual({ state: 'configured', names: ['test'], source: 'deskpet_config', githubUnavailableReason: 'plan_unsupported' });
+    const b = (await mk(classic(403, { message: 'Resource not accessible' })).getReviewContext(q, c)).sections.find((s) => s.sectionKind === 'checks');
+    expect(b?.sectionKind === 'checks' && b.data!.requiredChecks).toMatchObject({ state: 'unknown', reasonCode: 'insufficient_permission' });
   });
 
   it('refuses to send approvals while writes are disabled', async () => {

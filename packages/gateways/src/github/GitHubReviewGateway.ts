@@ -32,6 +32,11 @@ export interface GitHubReviewGatewayOptions {
   toolTimeoutMs?: number;
   /** Copilot 리뷰 작성자 판별 (inference: 실제 bot login은 통합 시 확인) */
   copilotLogins?: string[];
+  /**
+   * DeskPet 대체 필수 검사 목록 ('owner/name' → 검사 이름). GitHub가 요금제상 보호 기능을 제공하지 않을 때(plan_unsupported)만
+   * 사용한다. 권한 부족·조회 실패에는 쓰지 않는다 (그때는 GitHub 설정이 따로 있을 수 있으므로). README D-13.
+   */
+  requiredChecksFallback?: Record<string, string[]>;
 }
 
 const READ = 'github.read';
@@ -131,7 +136,7 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
       const runs = pages.items.flatMap((p) => p.runs);
       const req = await this.readOnce({ kind: 'required_checks', repository: q.repository, baseRef: pr.baseRef }, c);
       // 필수 검사 설정: 없다고 확인 vs 조회 불가를 구분한다. 결과 목록만 보고 추정하지 않는다
-      const requiredChecks: ChecksData['requiredChecks'] = req.ok ? req.data : { state: 'unknown', reason: req.error.message };
+      const requiredChecks = this.normalizeRequired(req.ok ? req.data : { state: 'unavailable', reasonCode: 'lookup_failed', detail: req.error.message }, q.repository);
       const runShas = new Set(runs.map((r) => r.headSha).filter(Boolean));
       const evidenceSha = runShas.size === 1 ? [...runShas][0] : runs.length === 0 ? pages.items[0]!.resolvedHeadSha : undefined;
       return {
@@ -194,6 +199,10 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
     }
     const priorReviewIds = await this.reviewIds(cmd, c);
 
+    if (!this.o.transport.writesEnabled) {
+      // 쓰기 잠금: ack도 요청하지 않는다
+      return notSent(err(WRITE, 'POLICY_BLOCKED', 'writes disabled (allowWrites=false)', 'none', ids), 'writes_disabled', { priorReviewIds });
+    }
     const timeoutMs = boundedTimeout(this.timeoutMs, c.deadlineAt, this.o.now());
     if (timeoutMs <= 0 || c.signal?.aborted) {
       return notSent(err(WRITE, 'DEADLINE_EXCEEDED', 'deadline exceeded before dispatch', 'none', ids), 'deadline_before_dispatch');
@@ -231,7 +240,8 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
     } catch (e) {
       if (!(e instanceof GitHubTransportError)) throw e;
       if (e.kind === 'not_sent') {
-        const code: ProvisionalErrorCode = e.proof === 'writes_disabled' ? 'POLICY_BLOCKED' : 'GITHUB_TRANSIENT';
+        // 쓰기 잠금·운영자 거절은 일시 오류가 아니므로 자동 재시도 대상이 아니다
+        const code: ProvisionalErrorCode = e.proof === 'writes_disabled' ? 'POLICY_BLOCKED' : e.proof === 'operator_declined' ? 'CANCELLED' : 'GITHUB_TRANSIENT';
         return notSent(err(WRITE, code, e.message, 'none', ids), e.proof ?? 'transport_not_sent');
       }
       if (e.kind === 'no_response' || e.kind === 'transient') {
@@ -282,6 +292,16 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
   }
 
   // ============================================================== helpers
+  private normalizeRequired(r: TransportReadResultMap['required_checks'], repo: { owner: string; name: string }): ChecksData['requiredChecks'] {
+    if (r.state !== 'unavailable') return r;
+    const key = `${repo.owner}/${repo.name}`.toLowerCase();
+    const fallback = Object.entries(this.o.requiredChecksFallback ?? {}).find(([k]) => k.toLowerCase() === key)?.[1];
+    if (r.reasonCode === 'plan_unsupported' && fallback) {
+      return { state: 'configured', names: fallback, source: 'deskpet_config', githubUnavailableReason: 'plan_unsupported' };
+    }
+    return { state: 'unknown', reasonCode: r.reasonCode, reason: r.detail };
+  }
+
   private iso() {
     return new Date(this.o.now()).toISOString();
   }

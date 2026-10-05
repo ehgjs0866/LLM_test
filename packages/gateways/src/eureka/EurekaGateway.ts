@@ -28,6 +28,11 @@ export interface EurekaGatewayOptions {
   http: HttpClient;
   now: () => number;
   totalTimeoutMs?: number;
+  /**
+   * 쓰기 허용. 기본 false — 사용자의 명시적 허락 전에는 실제 Eureka에 쓰지 않는다.
+   * false면 쓰기 메서드는 DurableAck도 요청하지 않고 not_sent(writes_disabled)를 돌려준다.
+   */
+  allowWrites?: boolean;
 }
 
 const WRITE_STAGE = 'eureka.write';
@@ -176,7 +181,9 @@ export class EurekaGateway implements EurekaGatewayPort {
   // ========================================== direct path (계약 미정, 다이어그램)
   /** 미정: 직접 경로의 사용자 확인 정책은 파이프라인 Eureka 모듈 소유. 정책이 없으면 소유자가 쓰기를 차단해야 한다. */
   registerItem(cmd: { processId: string; name: string; dueAtMs?: number; priority?: 'low' | 'normal' | 'high' | 'urgent' }, handle: DispatchHandle, c: CallConstraints) {
-    return this.sendWrite({ method: 'POST', path: '/_api_/items/0/start', body: cmd }, handle, c, (b) => {
+    // API 필드는 dueAt(밀리초 타임스탬프)이다 (eureka-desk-pet-guide §4 등록 예시). 내부 이름 dueAtMs를 그대로 보내지 않는다
+    const body = { processId: cmd.processId, name: cmd.name, ...(cmd.dueAtMs !== undefined ? { dueAt: cmd.dueAtMs } : {}), ...(cmd.priority ? { priority: cmd.priority } : {}) };
+    return this.sendWrite({ method: 'POST', path: '/_api_/items/0/start', body }, handle, c, (b) => {
       const item = b as { id?: unknown; stageIds?: unknown };
       return item?.id
         ? { response: { itemId: String(item.id), stageIds: item.stageIds }, externalRefs: [{ system: 'eureka' as const, kind: 'item', id: String(item.id) }] }
@@ -253,6 +260,9 @@ export class EurekaGateway implements EurekaGatewayPort {
     interpret: (body: unknown) => { response: Record<string, unknown>; externalRefs?: GatewayResult['externalRefs'] },
   ): Promise<GatewayResult> {
     const ids = { operationId: handle.operationId, attemptId: handle.attemptId };
+    if (!this.o.allowWrites) {
+      return notSent(err(WRITE_STAGE, 'POLICY_BLOCKED', 'writes disabled (allowWrites=false)', 'none', ids), 'writes_disabled');
+    }
     const timeoutMs = boundedTimeout(this.totalTimeoutMs, c.deadlineAt, this.o.now());
     if (timeoutMs <= 0 || c.signal?.aborted) {
       return notSent(err(WRITE_STAGE, 'DEADLINE_EXCEEDED', 'deadline exceeded before dispatch', 'none', ids), 'deadline_before_dispatch');

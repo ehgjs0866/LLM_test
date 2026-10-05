@@ -29,6 +29,8 @@ export interface PolicyConfig {
   eurekaTotalTimeoutMs: number;
   /** MCP 개별 도구 timeout (interface-contracts §7 제안값 30s) */
   githubToolTimeoutMs: number;
+  /** LLM 보조 Guide 호출 시간 상한(ms). 미정 (실측: gemini-3.1-flash-lite 단계 제안 약 3초) */
+  llmGuideTimeoutMs: number;
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -46,4 +48,5 @@ export const DEFAULT_POLICY: PolicyConfig = {
   eurekaConnectTimeoutMs: 2_000,
   eurekaTotalTimeoutMs: 8_000,
   githubToolTimeoutMs: 30_000,
+  llmGuideTimeoutMs: 8_000,
 };

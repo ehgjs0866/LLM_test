@@ -8,10 +8,10 @@ export const EUREKA_DEV_BASE_URL = 'https://api.eureka.codes/flw-d1';
  * 실제 REST 클라이언트 생성. 키는 env에서 읽고 메시지·로그에 남기지 않는다.
  * 사용자의 명시적 허락 전에는 테스트·스크립트에서 쓰기 호출을 하지 않는다.
  */
-export function createEurekaRestGateway(env: Record<string, string | undefined> = process.env, fetchImpl?: typeof fetch): EurekaGateway {
+export function createEurekaRestGateway(env: Record<string, string | undefined> = process.env, fetchImpl?: typeof fetch, opts: { allowWrites?: boolean } = {}): EurekaGateway {
   const key = env['EUREKA_API_KEY'];
   if (!key) throw new Error('EUREKA_API_KEY is not set (.env)');
-  const baseUrl = env['EUREKA_BASE_URL'] ?? EUREKA_DEV_BASE_URL;
+  const baseUrl = env['EUREKA_BASE_URL'] || EUREKA_DEV_BASE_URL;
   const http = new FetchHttpClient(baseUrl, () => ({ 'x-api-key': key }), fetchImpl);
-  return new EurekaGateway({ http, now: () => Date.now(), totalTimeoutMs: 8_000 });
+  return new EurekaGateway({ http, now: () => Date.now(), totalTimeoutMs: 8_000, allowWrites: opts.allowWrites ?? false });
 }

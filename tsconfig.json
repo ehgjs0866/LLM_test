@@ -30,6 +30,9 @@
       ],
       "@deskpet/projector": [
         "packages/projector/src/index.ts"
+      ],
+      "@deskpet/llm": [
+        "packages/llm/src/index.ts"
       ]
     }
   },

@@ -46,7 +46,7 @@ const unknownApproval: HarnessResult = {
   processingErrors: [],
 };
 
-const model = (text: string, emotion = 'cheerful'): OutputModel => ({ generate: async () => ({ text, emotion }) });
+const model = (text: string, emotion = 'cheerful', displayText?: string): OutputModel => ({ generate: async () => ({ text, emotion, ...(displayText !== undefined ? { displayText } : {}) }) });
 
 describe('HarnessOutputMapper', () => {
   it('question uses the pending outputId and requires target/action/version meaning', () => {
@@ -107,5 +107,48 @@ describe('OutputService', () => {
     expect(c.fallbackUsed).toBe(true);
     expect(c.validationResult.failures).toContain('reminder_due_missing');
     expect(c.text).toContain('2026년 9월 28일 밤 11시 59분');
+  });
+});
+
+describe('OutputService — displayText 검증 (화면 문장)', () => {
+  it('음성은 맞아도 화면 문장이 미확인 작업을 성공으로 표시하면 고정 문구로 되돌린다', async () => {
+    const c = await new OutputService({ model: model('PR 42번 승인 결과를 아직 확인하지 못했어요.', 'thinking', 'PR 42 승인 완료') }).generate(mapHarnessResult(unknownApproval));
+    expect(c.fallbackUsed).toBe(true);
+    expect(c.validationResult.failures).toContain('display:success_claim_without_success:submit_approval');
+    expect(c.displayText).not.toMatch(/승인\s*완료/);
+  });
+
+  it('화면 문장에서 승인 대상(필수 의미)이 빠지면 고정 문구로 되돌린다', async () => {
+    const c = await new OutputService({ model: model(`PR 42번 ${SHA_A.slice(0, 7)} 커밋을 승인할까요?`, 'thinking', '승인할까요?') }).generate(mapHarnessResult(approvalQuestion));
+    expect(c.fallbackUsed).toBe(true);
+    expect(c.validationResult.failures).toContain('display:missing_required:42');
+  });
+
+  it('화면 문장도 필수 의미를 지키면 모델 문장을 그대로 쓴다', async () => {
+    const d = `PR 42 @${SHA_A.slice(0, 7)} 승인 확인`;
+    const c = await new OutputService({ model: model(`PR 42번 ${SHA_A.slice(0, 7)} 커밋을 승인할까요?`, 'thinking', d) }).generate(mapHarnessResult(approvalQuestion));
+    expect(c.fallbackUsed).toBe(false);
+    expect(c.displayText).toBe(d);
+  });
+
+  it('모델이 화면 문장을 내지 않으면 고정 화면 문장을 쓰고 검사 실패로 보지 않는다', async () => {
+    const c = await new OutputService({ model: model(`PR 42번 ${SHA_A.slice(0, 7)} 커밋을 승인할까요?`, 'thinking') }).generate(mapHarnessResult(approvalQuestion));
+    expect(c.fallbackUsed).toBe(false);
+    expect(c.validationResult.failures).toEqual([]);
+  });
+});
+
+describe('blocked sentence for own PR', () => {
+  it('explains that GitHub does not allow approving your own PR', async () => {
+    const r: HarnessResult = {
+      requestId: 'req-1',
+      disposition: 'completed',
+      actionResults: [],
+      facts: { review: { prNumber: 9, repository: 'o/r' }, blocked: { reasons: ['cannot_approve_own_pr', 'required_checks_unverified'] } },
+      sources: [],
+      processingErrors: [],
+    };
+    const c = await new OutputService().generate(mapHarnessResult(r));
+    expect(c.text).toBe('PR 9번은 본인이 연 PR이라 GitHub에서 승인할 수 없어요.');
   });
 });

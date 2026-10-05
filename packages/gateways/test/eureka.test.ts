@@ -18,7 +18,7 @@ function setup() {
       { id: STAGE_ID, name: 'PR 승인', status: 'doing', order: 2 },
     ],
   });
-  const gw = new EurekaGateway({ http: server, now: () => NOW });
+  const gw = new EurekaGateway({ http: server, now: () => NOW, allowWrites: true });
   return { server, gw };
 }
 
@@ -124,6 +124,16 @@ describe('EurekaGateway.completeStage', () => {
     expect(server.writeCount('/_api_/stages/')).toBe(1);
   });
 
+  it('writes are disabled by default: no ack requested, nothing sent', async () => {
+    const { server } = setup();
+    const ro = new EurekaGateway({ http: server, now: () => NOW });
+    const { h, calls } = handle();
+    const r = await ro.completeStage(cmd, h, c);
+    expect(r).toMatchObject({ dispatchState: 'not_sent', notSentProof: 'writes_disabled' });
+    expect(calls()).toBe(0);
+    expect(server.writeCount('/')).toBe(0);
+  });
+
   it('does not send without ack', async () => {
     const { gw, server } = setup();
     const { h } = handle({ ok: false, reason: 'storage_error', detail: 'x' });
@@ -212,5 +222,17 @@ describe('FetchHttpClient', () => {
     const gw = createEurekaRestGateway({ EUREKA_API_KEY: 'k' }, fakeFetch);
     await gw.listTasks({}, { deadlineAt: new Date(Date.now() + 60_000).toISOString() });
     expect(url).toMatch(/^https:\/\/api\.eureka\.codes\/flw-d1\/_api_\/items\/0\/list\?sites=&detail=true&limit=100$/);
+  });
+});
+
+describe('EurekaGateway direct path — registerItem body', () => {
+  it('maps internal dueAtMs to the API field dueAt (same as postponeItem)', async () => {
+    const sent: unknown[] = [];
+    const http = { request: async (r: { body?: unknown }) => (sent.push(r.body), { status: 200, bodyText: JSON.stringify({ id: '1000099', stageIds: ['s1'] }) }) };
+    const gw = new EurekaGateway({ http, now: () => NOW, allowWrites: true });
+    const r = await gw.registerItem({ processId: 'general-work-v1@10204', name: '보고서 초안', dueAtMs: 1789900000000, priority: 'high' }, handle().h, c);
+    expect(sent[0]).toEqual({ processId: 'general-work-v1@10204', name: '보고서 초안', dueAt: 1789900000000, priority: 'high' });
+    expect(sent[0]).not.toHaveProperty('dueAtMs');
+    expect(r.externalRefs[0]).toMatchObject({ kind: 'item', id: '1000099' });
   });
 });

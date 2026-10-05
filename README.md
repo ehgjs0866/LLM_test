@@ -56,6 +56,26 @@ pnpm smoke github    # GitHub만
 
 `.env` 항목은 `.env.example` 참고. `GITHUB_TEST_REPO`/`GITHUB_TEST_PR`이 있으면 해당 PR의 리뷰 묶음 조회와 승인 차단 사유 계산까지 해 본다(계산만 하고 승인하지 않는다).
 키·토큰 값은 출력하지 않는다. 이 테스트는 키가 있는 PC에서 실행한다.
+연결 테스트에서 나온 문제와 해결 방법은 `docs/connection-test-issues.md`에 정리한다.
+필수 검사 설정을 확인할 수 없으면 이유를 함께 출력한다. 무료 요금제의 비공개 저장소처럼 `plan_unsupported`이면 `.env`의 `DESKPET_REQUIRED_CHECKS=owner/repo=test`로 대체 목록을 줄 수 있다.
+
+## 실제 연결 데모 (쓰기 비활성)
+
+실제 GitHub·Eureka Gateway를 `HarnessService`에 연결해 G-01 흐름(리뷰 → 승인 요청 → 확인 질문 → 답변)을 따라간다.
+GitHub 승인과 Eureka 단계 완료는 코드에서 꺼져 있다(`allowWrites=false`, 기본값). 승인 단계는 "쓰기가 꺼져 있어서 보내지 않았어요"로 끝나며, 이때 DurableAck도 요청하지 않는다.
+
+```bash
+pnpm demo                          # .env의 GITHUB_TEST_PR
+pnpm demo 9                        # PR 번호 지정
+pnpm demo 9 --answer "응, 승인해"   # 확인 질문 답변 미리 지정
+pnpm demo 11 --allow-github-writes  # GitHub 승인을 실제로 보냄 (전송 직전 yes 입력 필요)
+```
+
+`--allow-github-writes`를 줘도 실제 전송 직전에 저장소·PR·커밋을 보여 주고 터미널에서 정확히 `yes`를 입력해야 보낸다. 다른 입력이나 입력 없음(비대화형 실행 포함)은 `cancelled` + `not_sent`로 기록되고 자동 재시도하지 않는다. Eureka 쓰기는 데모에서 항상 꺼져 있다.
+
+- 파이프라인 역할(라우팅 결과, 질문 전달 이벤트)은 스크립트가 흉내 낸다. 키보드 입력이므로 입력 채널은 `web`이다.
+- `DEMO_EUREKA_ITEM_ID`/`DEMO_EUREKA_STAGE_ID`를 주면 PR과 Eureka 단계를 연결한다(승인 성공 후 후속 적합성 확인에 사용).
+- 본인이 연 PR은 GitHub 규칙상 승인할 수 없어 확인 질문 전에 막힌다. 확인 질문까지 보려면 다른 계정이 연 PR이 필요하다.
 
 ## 구현 원칙 (요약)
 
@@ -82,6 +102,8 @@ pnpm smoke github    # GitHub만
 | D-10 | Eureka `getChangeOutcome`은 멱등키가 없어 인과 연결을 `candidate_only`로만 보고한다. 응답 유실된 단계 완료는 `unknown` + `recovery=needed`로 남고 운영 조치로 정리한다 | inference (C-09) |
 | D-11 | 권한을 조회할 수 없으면 승인을 차단한다 (`permission_unverified`). GitHub 실제 권한 조회 수단은 미정 | inference |
 | D-12 | 읽기(`get_review_context`)도 OperationRecord로 기록한다. "사용자가 들은 리뷰 SHA"는 같은 대화의 최근 성공 리뷰 operation에서 찾는다 | inference |
+| D-13 | 필수 검사 설정 조회 결과를 `configured`/`none_configured`/`unknown(plan_unsupported·insufficient_permission·lookup_failed)`로 구분한다. rulesets(읽기 권한)와 classic protection(관리자 권한)을 함께 본다. GitHub가 요금제상 보호 기능을 제공하지 않을 때(`plan_unsupported`)만 DeskPet 대체 목록(`DESKPET_REQUIRED_CHECKS`)을 쓰고 출처를 `deskpet_config`로 표시한다. 대체 목록이 없거나 다른 이유면 계속 차단 | 사용자 결정 2026-10-05 |
+| D-14 | 필수가 아닌 검사의 실패·진행 중은 승인을 막지 않고 경고(`approvalWarnings`)로 리뷰 요약과 확인 질문에 알린다 | 사용자 결정 2026-10-05 |
 
 ## 문서 충돌과 잠정 처리
 

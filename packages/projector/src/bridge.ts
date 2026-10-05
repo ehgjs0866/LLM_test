@@ -1,4 +1,4 @@
-import type { OperationRecord, OperationUpdated, OutputContent, OutputEvent, Snapshot, Tombstone } from '@deskpet/contracts';
+import { SNAPSHOT_SCOPE_ALL, type ConfirmationRecord, type OperationRecord, type OperationUpdated, type OutputContent, type OutputEvent, type Pending, type Snapshot, type Tombstone } from '@deskpet/contracts';
 
 /**
  * 원본 → 투영 이벤트 변환 헬퍼.
@@ -19,13 +19,29 @@ export function fromStoreChange(c: StoreChangeLike, epoch: number): OperationUpd
   return { kind: 'operation.updated', source: 'harness', epoch, entityType: c.entityType, entityId: c.entityId, revision: c.revision, currentState: c.state, relatedIds: related };
 }
 
-export function snapshotFromOperations(ops: OperationRecord[], epoch: number, scope = 'operations'): Snapshot {
+/**
+ * Harness source 전체 스냅샷 (MVP: scope = source 전체).
+ * 입력은 저장소의 readProjectionSnapshot()처럼 같은 시점에 함께 읽은 세 종류여야 한다.
+ * 한 종류라도 빠지면 그 종류의 투영이 지워지므로 세 필드를 모두 요구한다.
+ */
+export interface HarnessSnapshotRecords {
+  operations: OperationRecord[];
+  pendings: Pending[];
+  confirmations: ConfirmationRecord[];
+}
+
+export function snapshotFromHarness(r: HarnessSnapshotRecords, epoch: number, tombstones: Snapshot['tombstones'] = []): Snapshot {
+  const state = (v: unknown) => v as Record<string, unknown>;
   return {
     source: 'harness',
-    scope,
+    scope: SNAPSHOT_SCOPE_ALL,
     epoch,
-    objectsWithRevisions: ops.map((o) => ({ entityType: 'operation', entityId: o.operationId, revision: o.revision, state: o as unknown as Record<string, unknown> })),
-    tombstones: [],
+    objectsWithRevisions: [
+      ...r.operations.map((o) => ({ entityType: 'operation' as const, entityId: o.operationId, revision: o.revision, state: state(o) })),
+      ...r.pendings.map((p) => ({ entityType: 'pending' as const, entityId: p.pendingId, revision: p.revision, state: state(p) })),
+      ...r.confirmations.map((c) => ({ entityType: 'confirmation' as const, entityId: c.confirmationId, revision: c.revision, state: state(c) })),
+    ],
+    tombstones,
   };
 }
 

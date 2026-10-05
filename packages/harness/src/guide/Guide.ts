@@ -12,8 +12,12 @@ import type { ReviewFacts } from '../facts.js';
  * - pr.approve : 승인 가능 조건 조회 → 확인 질문(ask_user confirmation) 또는 차단
  */
 export interface Guide {
-  proposeNext(input: GuideInput): GuideDecision;
+  /** 규칙 Guide는 동기, LLM 보조 Guide는 비동기로 답한다. Harness는 둘 다 await한다 */
+  proposeNext(input: GuideInput): GuideDecision | Promise<GuideDecision>;
 }
+
+/** 규칙 Guide가 처리하는 의도. 그 밖의 의도만 LLM 보조 Guide로 넘긴다 */
+export const RULE_INTENTS: ReadonlySet<string> = new Set(['pr.review', 'pr.approve']);
 
 export interface GuideFacts {
   review?: ReviewFacts;

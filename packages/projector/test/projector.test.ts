@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OperationUpdated } from '@deskpet/contracts';
-import { OutputProjectionFeed, RequestStateProjector } from '@deskpet/projector';
+import { OutputProjectionFeed, RequestStateProjector, snapshotFromHarness } from '@deskpet/projector';
 
 const upd = (id: string, revision: number, state: Record<string, unknown> = {}, epoch = 1): OperationUpdated => ({
   kind: 'operation.updated',
@@ -33,18 +33,18 @@ describe('RequestStateProjector', () => {
   it('resync: buffer → snapshot replaces scope → only higher buffered revisions applied', () => {
     const p = new RequestStateProjector();
     p.apply(upd('op-old', 1));
-    p.resync('harness', 'operations');
+    p.resync('harness');
     expect(p.apply(upd('op-1', 5, { executionPhase: 'stopped' }))).toBe('buffered');
     expect(p.apply(upd('op-1', 3, { executionPhase: 'prepared' }))).toBe('buffered');
     p.applySnapshot({
       source: 'harness',
-      scope: 'operations',
+      scope: 'all',
       epoch: 1,
       objectsWithRevisions: [{ entityType: 'operation', entityId: 'op-1', revision: 4, state: { requestId: 'req-1', executionPhase: 'dispatching' } }],
       tombstones: [],
     });
     const v = p.project();
-    expect(v.operations.map((o) => o.operationId)).toEqual(['op-1']); // op-old는 스냅샷 범위 교체로 제거
+    expect(v.operations.map((o) => o.operationId)).toEqual(['op-1']); // op-old는 source 전체 교체로 제거
     expect(v.operations[0]!.phase).toBe('stopped');
     expect(v.sources[0]!.synchronizationState).toBe('synced');
   });
@@ -58,7 +58,7 @@ describe('RequestStateProjector', () => {
 
   it('buffer overflow marks incomplete and requires a new resync', () => {
     const p = new RequestStateProjector({ bufferLimit: 1 });
-    p.resync('harness', 'operations');
+    p.resync('harness');
     p.apply(upd('a', 1));
     expect(p.apply(upd('b', 1))).toBe('buffer_overflow');
     expect(p.syncStates()[0]!.incompleteReason).toBe('buffer_overflow');
@@ -73,5 +73,66 @@ describe('RequestStateProjector', () => {
     const v = p.project();
     expect(v.operations[0]!.status).toBe('succeeded');
     expect(v.outputs[0]!.channels).toEqual({ speech: 'failed', display: 'completed' });
+  });
+
+  describe('snapshot scope = source 전체 (MVP)', () => {
+    const pendingUpd = (id: string, revision: number): OperationUpdated => ({ ...upd(id, revision), entityType: 'pending', currentState: { state: 'waiting', purpose: 'confirm_pr_approval' } });
+
+    it('Harness 스냅샷은 operation·pending·confirmation을 함께 담아 pending이 사라지지 않는다', () => {
+      const p = new RequestStateProjector();
+      p.apply(upd('op-1', 1));
+      p.apply(pendingUpd('p-1', 1));
+      p.resync('harness');
+      const snap = snapshotFromHarness(
+        {
+          operations: [{ operationId: 'op-1', revision: 2, requestId: 'req-1', action: 'submit_approval' } as never],
+          pendings: [{ pendingId: 'p-1', revision: 2, state: 'waiting', purpose: 'confirm_pr_approval' } as never],
+          confirmations: [{ confirmationId: 'c-1', pendingId: 'p-1', revision: 1 } as never],
+        },
+        1,
+      );
+      expect(snap.scope).toBe('all');
+      expect(p.applySnapshot(snap)).toBe('applied');
+      const v = p.project();
+      expect(v.operations.map((o) => o.revision)).toEqual([2]);
+      expect(v.pendings).toEqual([{ pendingId: 'p-1', state: 'waiting', purpose: 'confirm_pr_approval', revision: 2 }]);
+      expect(p.objects('harness').map((o) => o.entityType).sort()).toEqual(['confirmation', 'operation', 'pending']);
+    });
+
+    it('source 전체가 아닌 범위의 스냅샷은 거부하고 기존 투영을 지우지 않는다', () => {
+      const p = new RequestStateProjector();
+      p.apply(pendingUpd('p-1', 1));
+      p.resync('harness');
+      const partial = { source: 'harness', scope: 'operations', epoch: 1, objectsWithRevisions: [], tombstones: [] } as never;
+      expect(p.applySnapshot(partial)).toBe('unsupported_scope');
+      expect(p.project().pendings).toHaveLength(1);
+      expect(p.syncStates()[0]).toMatchObject({ synchronizationState: 'incomplete', incompleteReason: 'unsupported_scope:operations' });
+    });
+
+    it('resync 없이 도착한 스냅샷은 적용하지 않는다', () => {
+      const p = new RequestStateProjector();
+      p.apply(upd('op-1', 3));
+      expect(p.applySnapshot(snapshotFromHarness({ operations: [], pendings: [], confirmations: [] }, 1))).toBe('not_syncing');
+      expect(p.project().operations).toHaveLength(1);
+    });
+
+    it('현재보다 오래된 epoch의 스냅샷은 거부하고 계속 동기화를 기다린다', () => {
+      const p = new RequestStateProjector();
+      p.apply(upd('op-1', 1, {}, 2));
+      p.resync('harness');
+      expect(p.applySnapshot(snapshotFromHarness({ operations: [], pendings: [], confirmations: [] }, 1))).toBe('stale_epoch');
+      expect(p.project().operations).toHaveLength(1);
+      expect(p.syncStates()[0]!.synchronizationState).toBe('syncing');
+      expect(p.applySnapshot(snapshotFromHarness({ operations: [], pendings: [], confirmations: [] }, 2))).toBe('applied');
+      expect(p.project().operations).toHaveLength(0);
+    });
+
+    it('버퍼 포화 뒤 늦게 온 스냅샷은 적용하지 않는다', () => {
+      const p = new RequestStateProjector({ bufferLimit: 1 });
+      p.resync('harness');
+      p.apply(upd('a', 1));
+      p.apply(upd('b', 1));
+      expect(p.applySnapshot(snapshotFromHarness({ operations: [], pendings: [], confirmations: [] }, 1))).toBe('not_syncing');
+    });
   });
 });
