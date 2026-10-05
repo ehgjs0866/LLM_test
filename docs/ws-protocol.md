@@ -1,0 +1,99 @@
+# Harness 서비스 경계 — WebSocket (`deskpet.harness.v1`)
+
+> 잠정 경계. 파이프라인(손한솔) 연결 시 수정한다. README는 수정하지 않았다.
+
+## 구성
+
+```
+[파이프라인 / demo 클라이언트] ──ws──▶ HarnessWsServer ──▶ HarnessInbound(변환 층) ──▶ HarnessService · OutputService
+[웹 화면(viewer)]             ──ws──▶        └─ 구독: snapshot + 상태 이벤트 (OperationStore.subscribe)
+```
+
+| 위치 | 역할 | 파이프라인 연결 시 |
+| --- | --- | --- |
+| `packages/server/src/protocol.ts` | 프레임 형식 | 필요하면 수정 |
+| `packages/server/src/inbound.ts` | Envelope → Harness 호출 변환 (지금은 그대로 전달) | 입력 형식이 바뀌면 여기서 변환 |
+| `packages/server/src/HarnessWsServer.ts` | 인증·역할·상한·재전송·구독 | 그대로 |
+| `packages/server/src/operatorGate.ts` | GitHub 쓰기 직전 서버 콘솔 `yes` 확인 | 운영 정책에 따라 |
+| `scripts/server.ts` | 실행 진입점 (`pnpm harness`) — `pnpm server`는 pnpm 자체 명령이라 쓰지 않는다 | 그대로 |
+| `demo/` | 파이프라인 흉내 클라이언트 (`pnpm demo`) | **폴더째 삭제 가능** (서버는 import하지 않음) |
+
+## 연결
+
+1. WebSocket 연결 (기본 `ws://127.0.0.1:8787`). 브라우저는 `HARNESS_WS_ALLOWED_ORIGINS`에 있는 Origin만 허용 (403).
+2. 첫 프레임 `{"type":"hello","token":"…","role":"pipeline"|"viewer","client":"…"}` (5초 안에). 실패 시 4001, 시간 초과 4002.
+3. 서버 `{"type":"welcome","protocol":"deskpet.harness.v1","schemaVersion":"1.0","role":…,"epoch":…}`.
+
+역할: `pipeline` = 실행 + 구독, `viewer` = 구독만 (실행 요청은 `forbidden`).
+
+## 요청 / 응답
+
+```json
+{"type":"request","envelope":{"schemaVersion":"1.0","messageId":"m-1","kind":"harness.request","requestId":"req-1",
+  "createdAt":"…","deadlineAt":"…","payload":{ HarnessRequest }}}
+```
+
+| kind (Envelope) | payload | 응답 kind | 비고 |
+| --- | --- | --- | --- |
+| `harness.request` | HarnessRequest | `harness.result` | deadlineAt 필수 |
+| `harness.resume` | HarnessResumeRequest | `harness.result` | deadlineAt 필수 |
+| `pipeline.event` | PipelineEvent | `pipeline.event.result` (`{applied, reason?}`) | 질문 전달·발화 시작 등 |
+| `harness.cancel` | `{requestId, reason}` | `harness.cancel.result` | **명시적 취소만 취소** |
+| `output.from_result` | HarnessResult | `output.content` (OutputContent) | 서버가 매핑 후 출력 생성 |
+| `output.request` | OutputRequest | `output.content` | |
+
+응답: `{"type":"reply","causationId":"<요청 messageId>","requestId":"…","ok":true,"kind":"…","payload":…}`
+오류: `{"type":"reply","ok":false,"error":{"code":"invalid_message|forbidden|unsupported_kind|too_many_in_flight|shutting_down|internal","message":"…","issues":[…]}}`
+
+- Envelope 검증 실패, 지원하지 않는 major(`2.x`), 받지 않는 kind는 **실행 전에** 거부.
+- `internal` 오류는 원문을 응답에 넣지 않는다 (서버 로그에 오류 이름만). 다시 보내기 전에 상태를 확인할 것.
+
+## 끊김·재전송 (중복 실행 방지)
+
+- **연결 끊김은 취소가 아니다.** 받은 요청은 끝까지 처리되고 결과는 Harness 기록에 남는다.
+- 같은 `messageId` 재전송 → 실행 없이 같은 응답 (최근 1,000개). 같은 messageId에 다른 내용 → `invalid_message`.
+- 연결이 바뀌어 응답을 못 받았으면 **같은 `turnId`로 다시 보낸다** → Harness가 저장된 결과를 돌려준다 (턴 결과 보존 1시간).
+- 승인 같은 쓰기는 어떤 경우에도 경계에서 다시 보내지 않는다 (Harness·DispatchOwner 규칙).
+
+## 상태 구독
+
+`{"type":"subscribe","source":"harness"}` →
+1. `{"type":"snapshot","snapshot":{source:"harness",scope:"all",epoch,objectsWithRevisions,tombstones}}` (operation·pending·confirmation을 같은 시점에)
+2. 이후 `{"type":"event","event":OperationUpdated|Tombstone}` — snapshot을 읽기 전에 수집을 시작하므로 누락 없음.
+
+클라이언트는 entity별 더 높은 revision만 적용한다 (RequestStateProjector). epoch가 바뀌면(서버 재시작) 다시 구독한다.
+
+## 상한·운영
+
+| 항목 | 기본값 |
+| --- | --- |
+| 바인딩 | `127.0.0.1` |
+| 메시지 크기 | 256KB (초과 시 1009로 끊음) |
+| 연결당 동시 요청 | 8 |
+| 송신 버퍼 | 1MB 초과 시 느린 연결을 4008로 끊음 (Harness를 막지 않음) |
+| 종료 | SIGINT/SIGTERM → 새 요청 거부, 처리 중 요청 최대 30초 기다린 뒤 닫고 저장소 close |
+| 시작 | 저장소 열기 → 보존 정리 → 결과 확인이 필요한 쓰기를 읽기로만 확인 → 서버 시작 |
+
+## 쓰기
+
+- 기본은 쓰기 비활성.
+- `pnpm harness --allow-github-writes`일 때만 GitHub 승인 전송 가능. 전송 직전마다 **서버 콘솔**에서 `yes` 입력 (TTY가 아니면 거절). 클라이언트는 건너뛸 수 없다.
+- Eureka 쓰기는 항상 꺼져 있다.
+
+## 문서와 다른 점 (C-14)
+
+기술 스택 문서는 보드 안 프로세스 간 통신 후보로 gRPC·ZeroMQ를 적었고 WebSocket은 없다. 웹 화면(I-19)은 WebSocket이 자연스럽고, 파이프라인 쪽은 손한솔과 합의가 필요하다. 변환 층(`HarnessInbound`)이 전송과 분리되어 있어 gRPC 등으로 바꿔도 Harness·변환 층은 그대로 쓴다.
+
+## 실행
+
+```
+# 터미널 1
+pnpm harness                  # 또는 pnpm harness --allow-github-writes
+# 터미널 2
+pnpm demo 12                 # 기존 데모와 같은 입력·출력
+pnpm demo 12 --ask "이 PR 뭐가 바뀌었어?"
+```
+
+## 검증
+
+`tests/e2e/ws.test.ts` — 실제 localhost WebSocket: 토큰·hello 시간 초과·viewer 권한·Origin 거부, Envelope 거부(데드라인 없음·major 2·payload 오류·kind), 크기 상한, G-01 전체 흐름과 출력, 답변 직후 연결 끊김에도 승인 처리 + 같은 turnId 재전송 시 저장된 결과(GitHub 전송 1회), 같은 messageId 재전송, 명시적 취소, snapshot→이벤트 순서와 epoch.

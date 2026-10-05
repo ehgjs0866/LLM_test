@@ -166,6 +166,11 @@ export const PipelineEvent = z.object({
 });
 export type PipelineEvent = z.infer<typeof PipelineEvent>;
 
+// --------------------------------------------------------- HarnessCancel
+/** 명시적 취소 요청. 연결 끊김은 취소가 아니다 (서비스 경계 규칙) */
+export const HarnessCancel = z.object({ requestId: Id, reason: z.string().min(1).max(200) });
+export type HarnessCancel = z.infer<typeof HarnessCancel>;
+
 // --------------------------------------------------------- RecoveryRequest
 /** inference: 원 호출 deadline 이후 읽기 복구 추적. */
 export const RecoveryRequest = z.object({

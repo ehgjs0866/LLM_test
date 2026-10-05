@@ -12,10 +12,12 @@ export default defineConfig({
       '@deskpet/output': r('./packages/output/src/index.ts'),
       '@deskpet/projector': r('./packages/projector/src/index.ts'),
       '@deskpet/llm': r('./packages/llm/src/index.ts'),
+      '@deskpet/server': r('./packages/server/src/index.ts'),
+      '@': r('./apps/web/src'),
     },
   },
   test: {
-    include: ['packages/*/test/**/*.test.ts', 'tests/**/*.test.ts'],
+    include: ['packages/*/test/**/*.test.ts', 'apps/*/test/**/*.test.ts', 'tests/**/*.test.ts'],
     environment: 'node',
   },
 });

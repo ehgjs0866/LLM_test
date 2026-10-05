@@ -23,6 +23,7 @@
 | 10 | Gemini: smoke는 성공, demo에서는 Guide·출력 모두 `bad request (400)` | 해결 | SDK의 서버 timeout 헤더 제거, 시간 제한은 abortSignal로 |
 | 11 | 데모를 반복 실행할수록 DB 기록이 계속 쌓임 | 해결 | 보존 정책(축약·기간·개수 상한) + SQLite 공간 회수 |
 | 12 | 확인 질문에 "확인", "approve", "confirm"은 승인으로 인식되지 않음 | 의도한 동작 (보류) | 승인 답변은 보수적으로 판정. 입력 정규화는 파이프라인 쪽에서 통일 예정 |
+| 13 | `pnpm server`를 실행해도 아무 출력이 없음 | 해결 | pnpm 자체 명령과 이름 충돌 → `pnpm harness`로 변경 |
 
 ---
 
@@ -311,6 +312,13 @@ gh api repos/ehgjs0866/personal_MCP_test/commits/293300b/check-runs --jq ".check
 - 쓰기 확인은 애매하면 실행하지 않는 쪽이 안전하다. "확인"은 "확인해 볼게"처럼 승인이 아닌 뜻으로도 자주 쓰인다.
 - 허용 단어: 응, 네, 예, 그래, 좋아, 맞아, ㅇㅇ, 승인, 완료해, 진행해, yes, ok, okay (`packages/harness/src/policy/inputPolicy.ts`).
 - 음성 입력은 파이프라인(라우터)에서 의도를 정규화해 넘기므로, 단어 목록은 팀과 입력 형식을 맞출 때 함께 정한다.
+
+---
+
+## 13. `pnpm server`를 실행해도 아무 출력이 없음
+
+**원인**: `server`는 pnpm 자체 명령 이름(store server)이라 package.json 스크립트보다 먼저 처리되어 아무것도 실행되지 않았다. 앞서 `pnpm store`와 같은 문제.
+**해결**: 스크립트 이름을 `pnpm harness`로 변경 (`pnpm run server`처럼 run을 붙이는 방법도 있지만 혼동을 피하려고 이름을 바꿈). 이 세션에서 `pnpm server`가 출력 없이 끝나는 것을 재현해 확인했다.
 
 ---
 

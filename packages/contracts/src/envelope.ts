@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Id, UtcTimestamp } from './common.js';
-import { HarnessRequest, HarnessResumeRequest, HarnessResult, PipelineEvent } from './harness.js';
+import { HarnessCancel, HarnessRequest, HarnessResumeRequest, HarnessResult, PipelineEvent } from './harness.js';
 import { OutputEvent, OutputRequest } from './output.js';
 import { OperationUpdated, Tombstone } from './projection.js';
 
@@ -23,6 +23,10 @@ export const PAYLOAD_BY_KIND = {
   'harness.request': HarnessRequest,
   'harness.resume': HarnessResumeRequest,
   'harness.result': HarnessResult,
+  /** 명시적 취소 (서비스 경계) */
+  'harness.cancel': HarnessCancel,
+  /** HarnessResult로 출력 문장 생성 요청 (매핑은 서버의 HarnessOutputMapper가 한다) */
+  'output.from_result': HarnessResult,
   'pipeline.event': PipelineEvent,
   'output.request': OutputRequest,
   'output.event': OutputEvent,
