@@ -1,4 +1,4 @@
-import type { ActionResult, ConfirmationScope, Emotion, OutputRequest } from '@deskpet/contracts';
+import { confirmationTokens, type ActionResult, type ConfirmationScope, type Emotion, type OutputRequest } from '@deskpet/contracts';
 import { formatKoreanDateTime, short } from './format.js';
 
 /**
@@ -13,7 +13,7 @@ interface ReviewFactsLike {
   changes?: { fileCount: number; additions: number; deletions: number };
   checks?: { requiredState: string; required?: string[]; requiredSource?: string; requiredReasonCode?: string; failing: string[]; pending: string[] };
   approvalWarnings?: string[];
-  copilot?: { status: string; comments: unknown[]; blockingComments: number };
+  copilot?: { status: string; comments: unknown[]; blockingComments: number; commentCoverage?: string };
 }
 
 export function fallbackText(req: OutputRequest): { text: string; displayText: string; emotion: Emotion } {
@@ -159,7 +159,11 @@ function reviewSentence(r: ReviewFactsLike): string {
   }
   if (r.copilot) {
     if (r.copilot.status === 'current') {
-      s.push(r.copilot.comments.length === 0 ? 'Copilot 지적은 없어요.' : `Copilot 지적 ${r.copilot.comments.length}건이 있고 차단 수준은 ${r.copilot.blockingComments}건이에요.`);
+      const cov = r.copilot.commentCoverage;
+      if (cov && cov !== 'complete') {
+        // 세부 지적을 다 모으지 못했으면 '없다'고 말하지 않는다 (감사 F-06)
+        s.push(r.copilot.comments.length === 0 ? '현재 커밋의 Copilot 리뷰는 있지만 세부 지적은 확인하지 못했어요.' : `Copilot 지적은 확인된 것만 ${r.copilot.comments.length}건이고, 나머지는 확인하지 못했어요.`);
+      } else s.push(r.copilot.comments.length === 0 ? 'Copilot 지적은 없어요.' : `Copilot 지적 ${r.copilot.comments.length}건이 있고 차단 수준은 ${r.copilot.blockingComments}건이에요.`);
     } else if (r.copilot.status === 'stale_only') s.push('현재 커밋에 대한 Copilot 리뷰는 아직 없어요. 이전 커밋 리뷰만 있어요.');
     else if (r.copilot.status === 'none') s.push('Copilot 리뷰는 없어요.');
     else s.push('리뷰 목록은 확인하지 못했어요.');
@@ -194,15 +198,11 @@ function questionSentence(q: { purpose: string; scope?: ConfirmationScope }, pr?
       return '무엇을 도와드릴지 조금 더 자세히 말해 주시겠어요?';
     case 'restate_write_command':
       return `승인 명령을 정확히 듣지 못했어요. ${pr ? `PR ${pr}번을 승인하려면 '${pr}번 승인해'라고` : '대상과 함께'} 다시 말해 주세요.`;
-    case 'confirm_pr_approval': {
-      const s = q.scope!;
-      const t = s.target.kind === 'github_pr' ? s.target : undefined;
-      return `${t?.repository.owner}/${t?.repository.name} PR ${t?.prNumber}번, 현재 커밋 ${short(s.headSha)}을 승인할까요?`;
-    }
-    case 'confirm_stage_completion': {
-      const name = (q.scope?.exactChange?.['stageName'] as string | undefined) ?? '해당';
-      return `Eureka의 '${name}' 단계를 완료로 반영할까요?`;
-    }
+    // 대상·행위·버전은 고정 범위 문구로만 말한다 (contracts/confirmation.ts)
+    case 'confirm_pr_approval':
+      return `${confirmationTokens(q.scope!)[0]}을 승인할까요?`;
+    case 'confirm_stage_completion':
+      return `${confirmationTokens(q.scope!)[0]}할까요?`;
     default:
       return '어떻게 할까요?';
   }

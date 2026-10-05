@@ -82,13 +82,14 @@ async function call(kind: string, requestId: string, payload: unknown, withDeadl
 
 const eventSeq = new Map<string, number>();
 /** 질문을 사용자에게 전달했다고 Harness에 알린다 (실제로는 파이프라인이 출력 완료 후 보낸다) */
-async function deliverQuestion(r: HarnessResult) {
+/** spokenText: 실제로 사용자에게 보여 준 질문 문장. 확인 질문은 이 문장이 범위와 맞아야 Harness가 전달로 인정한다 */
+async function deliverQuestion(r: HarnessResult, spokenText: string) {
   const n = (eventSeq.get(r.requestId) ?? 0) + 1;
   eventSeq.set(r.requestId, n);
   const res = (await call(
     'pipeline.event',
     r.requestId,
-    { messageId: `demo-ev-${runId}-${r.requestId}-${n}`, requestId: r.requestId, pendingId: r.pending!.pendingId, outputId: r.pending!.outputId, sourceRevision: n, occurredAt: new Date().toISOString(), kind: 'question_delivered', channel: 'web' },
+    { messageId: `demo-ev-${runId}-${r.requestId}-${n}`, requestId: r.requestId, pendingId: r.pending!.pendingId, outputId: r.pending!.outputId, sourceRevision: n, occurredAt: new Date().toISOString(), kind: 'question_delivered', channel: 'web', deliveredText: spokenText },
     false,
   )) as { applied: boolean; reason?: string };
   if (!res.applied) throw new Error(`질문 전달 이벤트가 반영되지 않았어요: ${res.reason}`);
@@ -98,7 +99,7 @@ async function deliverQuestion(r: HarnessResult) {
 }
 
 // ------------------------------------------------------------------ 출력
-async function show(title: string, r: HarnessResult) {
+async function show(title: string, r: HarnessResult): Promise<string> {
   console.log(`\n── ${title} ──`);
   console.log(`  disposition: ${r.disposition}`);
   for (const a of r.actionResults) {
@@ -124,6 +125,7 @@ async function show(title: string, r: HarnessResult) {
   console.log(`  🗣 ${content.text}`);
   console.log(`  🖥 ${content.displayText}`);
   console.log(`  · 출력: ${content.fallbackUsed ? `고정 문구${content.validationResult.failures.length ? ` (모델 문장 거부: ${content.validationResult.failures.join(', ')})` : ''}` : '모델 문장 (검증 통과)'}`);
+  return content.text;
 }
 
 async function ask(question: string): Promise<string | undefined> {
@@ -156,10 +158,10 @@ async function main() {
 
   const approveId = `demo-approve-${runId}`;
   let r = (await call('harness.request', approveId, { requestId: approveId, currentTurn: turn('좋아, 그 PR 승인해줘', 'pr.approve'), context, constraints: constraints() })) as HarnessResult;
-  await show('2) 승인 요청', r);
+  let spoken = await show('2) 승인 요청', r);
 
   for (let step = 3; step <= 5 && r.disposition === 'awaiting_user' && r.pending; step++) {
-    const p = await deliverQuestion(r);
+    const p = await deliverQuestion(r, spoken);
     const text = await ask('답변을 입력하세요 (예: 응, 승인해 / 아니, 보류해). 빈 입력이면 종료합니다.');
     if (!text) {
       console.log('\n답변 없이 종료합니다. 대기 중인 확인은 실행되지 않습니다.');
@@ -174,7 +176,7 @@ async function main() {
       ...(r.pending.confirmationId ? { confirmationId: r.pending.confirmationId } : {}),
       newCallConstraints: constraints(),
     })) as HarnessResult;
-    await show(`${step}) 답변 처리`, r);
+    spoken = await show(`${step}) 답변 처리`, r);
   }
 
   const mine = [...client.entities.values()].filter((e) => e.entityType === 'operation' && String(e.state['requestId'] ?? '').endsWith(`-${runId}`));

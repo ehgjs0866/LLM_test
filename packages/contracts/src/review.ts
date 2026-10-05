@@ -86,7 +86,14 @@ export const ReviewItem = z.object({
   commitSha: GitSha.optional(),
   submittedAt: UtcTimestamp.optional(),
   comments: z.array(
-    z.object({ path: z.string().optional(), line: z.number().int().optional(), severity: z.string().optional(), body: z.string() }),
+    z.object({
+      path: z.string().optional(),
+      line: z.number().int().optional(),
+      severity: z.string().optional(),
+      body: z.string(),
+      /** summary: 리뷰 본문, inline: 코드 줄에 단 지적 (감사 F-06) */
+      kind: z.enum(['summary', 'inline']).optional(),
+    }),
   ),
 });
 export type ReviewItem = z.infer<typeof ReviewItem>;
@@ -108,6 +115,17 @@ const sectionBase = {
   pagination: z.object({ hasMore: z.boolean(), pagesRead: z.number().int().nonnegative() }).optional(),
   truncation: z.object({ truncated: z.boolean(), limit: z.number().int().optional() }).optional(),
   error: ErrorInfo.optional(),
+  /**
+   * 섹션 안 세부 자료의 수집 범위 (감사 F-06). 목록 페이지 완전성(completeness)과 따로 표시한다.
+   * - patches: 변경 줄 내용(diff). MVP는 파일·증감 줄 수만 모으고 내용은 모으지 않는다(not_collected).
+   * - inlineComments: 리뷰의 코드 줄 지적. complete | partial(페이지 상한) | unavailable(조회 실패)
+   */
+  detailCoverage: z
+    .object({
+      patches: z.enum(['complete', 'partial', 'unavailable', 'not_collected']).optional(),
+      inlineComments: z.enum(['complete', 'partial', 'unavailable', 'not_collected']).optional(),
+    })
+    .optional(),
 };
 
 export const ReviewSection = z.discriminatedUnion('sectionKind', [

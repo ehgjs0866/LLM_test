@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GitHubReviewGateway, GitHubTransportError, RestGitHubTransport } from '@deskpet/gateways';
+import { reviewFacts } from '@deskpet/harness';
+import { fallbackText } from '@deskpet/output';
 import { PR, REPO, SHA_A, T0 } from '../../../tests/support/builders.js';
 
 type Route = (url: URL, init: RequestInit) => { status: number; body: unknown } | undefined;
@@ -107,5 +109,61 @@ describe('RestGitHubTransport', () => {
 
   it('requires a token', () => {
     expect(() => new RestGitHubTransport({ token: '' })).toThrow(/GITHUB_TOKEN/);
+  });
+});
+
+describe('RestGitHubTransport — 리뷰 세부 자료 (감사 F-06)', () => {
+  const SHA_OLD = 'c'.repeat(40);
+  const withReviews = (reviews: unknown[], comments: unknown[] | 'fail'): Route[] => [
+    ...golden.filter((_, i) => i !== 4),
+    (u) => (u.pathname === `${base}/pulls/${PR}/reviews` ? { status: 200, body: reviews } : undefined),
+    (u) => (u.pathname === `${base}/pulls/${PR}/comments` ? (comments === 'fail' ? { status: 502, body: { message: 'Bad Gateway' } } : { status: 200, body: comments }) : undefined),
+  ];
+  const copilotReview = (id: number, sha: string) => ({ id, user: { login: 'copilot-pull-request-reviewer[bot]' }, state: 'COMMENTED', commit_id: sha, submitted_at: T0, body: 'Pull request overview' });
+  const inline = (reviewId: number, path: string, line: number, body: string) => ({ id: reviewId * 10 + line, pull_request_review_id: reviewId, path, line, body, commit_id: SHA_A, user: { login: 'copilot-pull-request-reviewer[bot]' } });
+
+  async function factsFor(routes: Route[]) {
+    const t = new RestGitHubTransport({ token: 'tok', fetchImpl: fakeFetch(routes) });
+    const gw = new GitHubReviewGateway({ transport: t, now: () => Date.parse(T0) });
+    const ctx = await gw.getReviewContext({ repository: { ...REPO }, prNumber: PR, requestedSections: ['changes', 'checks', 'reviews'], deadlineAt: '2099-01-01T00:00:00.000Z' }, { deadlineAt: '2099-01-01T00:00:00.000Z' });
+    return { ctx, facts: reviewFacts(ctx) };
+  }
+
+  it('현재 커밋 Copilot 리뷰: 본문은 요약, 코드 줄 지적은 경로·줄과 함께 모은다', async () => {
+    const { ctx, facts } = await factsFor(withReviews([copilotReview(77, SHA_A)], [inline(77, 'src/a.ts', 3, 'null 체크'), inline(77, 'src/b.ts', 9, '이름')]));
+    const reviews = ctx.sections.find((s) => s.sectionKind === 'reviews');
+    expect(reviews?.detailCoverage).toEqual({ inlineComments: 'complete' });
+    expect(facts.copilot).toMatchObject({ status: 'current', commentCoverage: 'complete', comments: [{ path: 'src/a.ts', line: 3 }, { path: 'src/b.ts', line: 9 }] });
+    // 변경 내용(diff)은 MVP에서 모으지 않는다고 표시
+    expect(ctx.sections.find((s) => s.sectionKind === 'changes')?.detailCoverage).toEqual({ patches: 'not_collected' });
+    expect(facts.patchCoverage).toBe('not_collected');
+  });
+
+  it('이전 커밋 리뷰만 있으면 stale_only', async () => {
+    const { facts } = await factsFor(withReviews([copilotReview(70, SHA_OLD)], []));
+    expect(facts.copilot?.status).toBe('stale_only');
+  });
+
+  it('Copilot 리뷰가 없으면 none', async () => {
+    const { facts } = await factsFor(withReviews([], []));
+    expect(facts.copilot?.status).toBe('none');
+  });
+
+  it('코드 줄 지적 조회가 실패하면 "지적 없음"이라고 하지 않는다', async () => {
+    const { ctx, facts } = await factsFor(withReviews([copilotReview(77, SHA_A)], 'fail'));
+    expect(ctx.sections.find((s) => s.sectionKind === 'reviews')).toMatchObject({ completeness: 'complete', detailCoverage: { inlineComments: 'unavailable' } });
+    expect(facts.copilot).toMatchObject({ status: 'current', comments: [], commentCoverage: 'unavailable' });
+    const text = fallbackText({
+      outputId: 'o',
+      requestRefs: { requestId: 'r', operationIds: [] },
+      purpose: 'result',
+      actionResults: [],
+      facts: { review: { prNumber: PR, repository: `${REPO.owner}/${REPO.name}`, headSha: SHA_A, changes: { fileCount: 1, additions: 3, deletions: 1 }, copilot: facts.copilot } },
+      sources: [],
+      requiredMeaning: [],
+      constraints: { language: 'ko-KR', maxSpeechChars: 300, allowedEmotions: ['neutral'] },
+    }).text;
+    expect(text).not.toContain('Copilot 지적은 없어요');
+    expect(text).toContain('세부 지적은 확인하지 못했어요');
   });
 });

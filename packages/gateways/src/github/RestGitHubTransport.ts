@@ -115,10 +115,26 @@ export class RestGitHubTransport implements GitHubTransport {
             state: String(r.state) as 'APPROVED',
             ...(r.commit_id ? { commitSha: String(r.commit_id) } : {}),
             ...(r.submitted_at ? { submittedAt: new Date(r.submitted_at).toISOString() } : {}),
-            comments: r.body ? [{ body: String(r.body) }] : [],
+            comments: r.body ? [{ body: String(r.body), kind: 'summary' as const }] : [],
           })),
           hasMore: list.length >= q.perPage,
         } satisfies TransportReadResultMap['reviews'];
+      }
+      case 'review_comments': {
+        const b = await this.get(`${repo}/pulls/${q.prNumber}/comments`, c, { per_page: String(q.perPage), page: String(q.page) });
+        const list = Array.isArray(b) ? b : [];
+        return {
+          comments: list
+            .filter((x: Gh) => x.pull_request_review_id != null)
+            .map((x: Gh) => ({
+              reviewId: String(x.pull_request_review_id),
+              path: String(x.path ?? ''),
+              ...(typeof (x.line ?? x.original_line) === 'number' ? { line: Number(x.line ?? x.original_line) } : {}),
+              body: String(x.body ?? ''),
+              ...(x.commit_id ? { commitSha: String(x.commit_id) } : {}),
+            })),
+          hasMore: list.length >= q.perPage,
+        } satisfies TransportReadResultMap['review_comments'];
       }
       case 'viewer': {
         const me = await this.get('/user', c);

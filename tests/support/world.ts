@@ -1,13 +1,14 @@
 import type { HarnessResult, LlmClient, PipelineEvent } from '@deskpet/contracts';
-import { EurekaGateway, FakeEurekaServer, GitHubReviewGateway, type FakePr } from '@deskpet/gateways';
+import { EurekaGateway, FakeEurekaServer, GitHubReviewGateway, type FakePr, type OperatorConfirm } from '@deskpet/gateways';
 import { DEFAULT_POLICY, FakeClock, HarnessService, InMemoryOperationStore, SequentialIdGen, type PolicyConfig, type Sensor } from '@deskpet/harness';
+import { OutputService, mapHarnessResult } from '@deskpet/output';
 import { ITEM_ID, STAGE_ID, T0 } from './builders.js';
 import { fakeGitHub, goldenPr } from './github.js';
 
 /**
  * fake Gateway 기반 테스트 환경. 파이프라인 역할(질문 전달 이벤트)은 테스트가 흉내 낸다.
  */
-export function createWorld(opts: { githubMode?: 'rest' | 'mcp'; config?: Partial<PolicyConfig>; pr?: FakePr; requiredChecksFallback?: Record<string, string[]>; sensor?: Sensor; llm?: LlmClient; durablePath?: string } = {}) {
+export function createWorld(opts: { githubMode?: 'rest' | 'mcp'; config?: Partial<PolicyConfig>; pr?: FakePr; requiredChecksFallback?: Record<string, string[]>; sensor?: Sensor; llm?: LlmClient; durablePath?: string; operatorConfirm?: OperatorConfirm } = {}) {
   const clock = new FakeClock(T0);
   const ids = new SequentialIdGen();
   const config = { ...DEFAULT_POLICY, ...opts.config };
@@ -34,15 +35,17 @@ export function createWorld(opts: { githubMode?: 'rest' | 'mcp'; config?: Partia
       { id: STAGE_ID, name: 'PR 승인', status: 'doing', order: 2 },
     ],
   });
-  const githubGw = new GitHubReviewGateway({ transport: github, now: () => clock.nowMs(), ...(opts.requiredChecksFallback ? { requiredChecksFallback: opts.requiredChecksFallback } : {}) });
+  const githubGw = new GitHubReviewGateway({ transport: github, now: () => clock.nowMs(), ...(opts.requiredChecksFallback ? { requiredChecksFallback: opts.requiredChecksFallback } : {}), ...(opts.operatorConfirm ? { operatorConfirm: opts.operatorConfirm } : {}) });
   const eurekaGw = new EurekaGateway({ http: eurekaServer, now: () => clock.nowMs(), allowWrites: true });
   const makeHarness = () => new HarnessService({ store, github: githubGw, eureka: eurekaGw, clock, ids, config, ...(opts.sensor ? { sensor: opts.sensor } : {}), ...(opts.llm ? { llm: opts.llm } : {}) });
   let harness = makeHarness();
 
   const seq = new Map<string, number>();
   /** 파이프라인이 질문을 실제로 전달했다고 보고한다 */
-  async function deliverQuestion(result: HarnessResult, channel: 'speech' | 'display' | 'web' = 'speech') {
+  async function deliverQuestion(result: HarnessResult, channel: 'speech' | 'display' | 'web' = 'speech', deliveredText?: string) {
     const p = result.pending!;
+    // 파이프라인은 실제로 말한 문장을 함께 보고한다. 기본값은 고정 문구 출력
+    const text = deliveredText ?? (await new OutputService().generate(mapHarnessResult(result))).text;
     const n = (seq.get(result.requestId) ?? 0) + 1;
     seq.set(result.requestId, n);
     const ev: PipelineEvent = {
@@ -54,6 +57,7 @@ export function createWorld(opts: { githubMode?: 'rest' | 'mcp'; config?: Partia
       occurredAt: clock.nowIso(),
       kind: 'question_delivered',
       channel,
+      deliveredText: text,
     };
     const r = await harness.onPipelineEvent(ev);
     if (!r.applied) throw new Error(`delivery not applied: ${r.reason}`);

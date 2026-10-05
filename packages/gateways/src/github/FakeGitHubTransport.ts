@@ -98,7 +98,15 @@ export class FakeGitHubTransport implements GitHubTransport {
         if (p.requiredChecks === 'unsupported') return { state: 'unavailable', reasonCode: 'insufficient_permission', detail: 'branch protection not readable' };
         return p.requiredChecks;
       case 'reviews':
-        return { reviews: p.reviews, hasMore: false };
+        // 실제 API처럼 리뷰 목록에는 본문만, 코드 줄 지적은 review_comments로 나눠서 준다
+        return { reviews: p.reviews.map((r) => ({ ...r, comments: r.comments.filter((x) => !x.path).map((x) => ({ ...x, kind: 'summary' as const })) })), hasMore: false };
+      case 'review_comments':
+        return {
+          comments: p.reviews.flatMap((r) =>
+            r.comments.filter((x) => !!x.path).map((x) => ({ reviewId: r.reviewId, path: x.path!, ...(x.line !== undefined ? { line: x.line } : {}), body: x.body, ...(r.commitSha ? { commitSha: r.commitSha } : {}), ...(x.severity ? { severity: x.severity } : {}) })),
+          ),
+          hasMore: false,
+        };
       case 'viewer':
         return { ...this.viewer };
     }

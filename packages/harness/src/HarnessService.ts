@@ -31,6 +31,7 @@ import {
   type SensorAssessment,
   type SourceRef,
   type TaskRef,
+  deliveredQuestionMatches,
 } from '@deskpet/contracts';
 import { StoreDispatchOwner } from './dispatch/DispatchOwner.js';
 import { reviewFacts, type ReviewFacts } from './facts.js';
@@ -88,7 +89,12 @@ interface RequestMeta {
   taskRefs: TaskRef[];
   deadlineAt: string;
   abort: AbortController;
+  /** 마지막으로 쓴 시각. 오래된 항목 정리용 (감사 F-07) */
+  touchedAtMs: number;
 }
+
+/** 메모리에 들고 있는 요청 상태 상한 (감사 F-07). 끝난 요청은 바로 지우고, 답변 대기 요청만 남긴다 */
+const MAX_TRACKED_REQUESTS = 500;
 
 const WRITE_RETRYABLE: ReadonlySet<ProvisionalErrorCode> = new Set(['GITHUB_TRANSIENT', 'EUREKA_TRANSIENT']);
 
@@ -122,6 +128,7 @@ export class HarnessService {
     const meta = this.meta(req.requestId, req.currentTurn, req.context, req.constraints.deadlineAt, intentOf(req.currentTurn));
     const result = await this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints);
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
+    this.settle(result);
     return result;
   }
 
@@ -135,6 +142,7 @@ export class HarnessService {
 
     const result = await this.resumeInner(req);
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
+    this.settle(result);
     return result;
   }
 
@@ -247,6 +255,12 @@ export class HarnessService {
     switch (e.kind) {
       case 'question_delivered':
         if (e.pendingId && e.outputId) {
+          // 확인 질문은 실제로 전달한 문장이 저장된 범위(대상·행위·버전)와 맞을 때만 전달로 인정한다 (감사 F-01)
+          const pd = await this.d.store.getPending(e.pendingId);
+          if (pd?.kind === 'confirmation' && pd.scope && !deliveredQuestionMatches(pd.scope, e.deliveredText)) {
+            if (meta) meta.stateRevision += 1;
+            return { applied: false, reason: e.deliveredText ? 'question_scope_mismatch' : 'delivered_text_required' };
+          }
           await this.d.store.markQuestionDelivered(e.pendingId, e.outputId, {
             deliveredAt: e.occurredAt,
             channel: e.channel ?? 'speech',
@@ -588,6 +602,9 @@ export class HarnessService {
         approvalOperationId: approvalOp.operationId,
         approvedSha,
         reviewId,
+        // 확인 질문 문장이 함께 말하는 승인 PR (전달 문장 검사 허용 목록, 감사 F-01)
+        linkedRepository: `${t.repository.owner}/${t.repository.name}`,
+        linkedPrNumber: t.prNumber,
         priorStageStatus: check.evidence['stageStatus'],
         stageName: check.evidence['stageName'],
         followUpObservedAt: this.d.clock.nowIso(),
@@ -957,9 +974,40 @@ export class HarnessService {
       taskRefs: ctx.taskRefs,
       deadlineAt,
       abort: new AbortController(),
+      touchedAtMs: this.d.clock.nowMs(),
     };
+    this.requests.delete(requestId);
     this.requests.set(requestId, m);
+    this.sweepRequests();
     return m;
+  }
+
+  /** 답변을 기다리지 않는 요청은 메모리에서 지운다. 결과는 turn 기록·operation 기록에 남아 있다 */
+  private settle(result: HarnessResult) {
+    const m = this.requests.get(result.requestId);
+    if (!m) return;
+    if (result.disposition === 'awaiting_user') m.touchedAtMs = this.d.clock.nowMs();
+    else if (!m.eventGap) this.requests.delete(result.requestId);
+  }
+
+  /**
+   * 질문 유효 기간이 지난 항목을 지운다. 그래도 상한을 넘으면 오래된 것부터 지우되, 순서 누락(eventGap)·취소 표시가 있는
+   * 항목은 유효 기간이 지날 때까지 남긴다 (지우면 그 표시로 막던 실행이 풀릴 수 있으므로).
+   */
+  private sweepRequests() {
+    if (this.requests.size <= MAX_TRACKED_REQUESTS) return;
+    const now = this.d.clock.nowMs();
+    const ttl = Math.max(this.cfg.confirmationTtlMs, this.cfg.clarificationTtlMs) * 2;
+    for (const [id, m] of this.requests) if (now - m.touchedAtMs > ttl) this.requests.delete(id);
+    for (const [id, m] of this.requests) {
+      if (this.requests.size <= MAX_TRACKED_REQUESTS) break;
+      if (!m.eventGap && !m.cancelled) this.requests.delete(id);
+    }
+  }
+
+  /** 진단·테스트용: 메모리에 들고 있는 요청 수 */
+  get trackedRequestCount(): number {
+    return this.requests.size;
   }
 
   private restoreMeta(p: Pending, req: HarnessResumeRequest): RequestMeta {

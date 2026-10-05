@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { parseEnvelope, SUPPORTED_MAJOR, type Envelope } from '@deskpet/contracts';
+import { clampPayloadDeadline, parseEnvelope, SUPPORTED_MAJOR, type Envelope } from '@deskpet/contracts';
 import type { OperationStore, StoreChange } from '@deskpet/harness';
 import { fromStoreChange, snapshotFromHarness } from '@deskpet/projector';
 import type { HarnessInbound } from './inbound.js';
@@ -38,6 +38,11 @@ export interface HarnessWsServerOptions {
   helloTimeoutMs?: number;
   /** 같은 messageId 응답을 기억하는 개수 */
   replayCacheSize?: number;
+  /** 서버 전체 동시 처리 상한 (연결 수와 무관). 기본 32 */
+  maxInFlightTotal?: number;
+  /** snapshot 전송 전에 모아 둘 이벤트 상한. 넘으면 그 연결을 닫아 다시 구독하게 한다. 기본 1000 */
+  maxPendingEvents?: number;
+  now?: () => number;
   log?: (line: string) => void;
 }
 
@@ -215,10 +220,13 @@ export class HarnessWsServer {
       if (cached.fingerprint !== fingerprint) return this.send(conn, fail('invalid_message', 'messageId reused with different content'));
       return this.send(conn, await cached.reply);
     }
+    // 이미 기한이 지난 요청은 실행하지 않는다. 위의 재전달 응답은 실행 결과이므로 그대로 돌려준다 (감사 F-05)
+    if (env.deadlineAt && Date.parse(env.deadlineAt) <= (this.o.now ?? Date.now)()) return this.send(conn, fail('deadline_exceeded', 'envelope deadline already passed; not executed'));
+    if (this.inFlight.size >= (this.o.maxInFlightTotal ?? 32)) return this.send(conn, fail('too_many_in_flight', 'server is at its concurrent request limit'));
     if (conn.inFlight >= (this.o.maxInFlightPerConnection ?? 8)) return this.send(conn, fail('too_many_in_flight', 'too many concurrent requests on this connection'));
 
     conn.inFlight += 1;
-    const reply = this.execute(env);
+    const reply = this.execute(clampPayloadDeadline(env));
     this.remember(env.messageId, { fingerprint, reply });
     this.inFlight.add(reply);
     try {
@@ -265,7 +273,17 @@ export class HarnessWsServer {
     const event = fromStoreChange(c, this.epoch);
     for (const conn of this.conns) {
       if (!conn.subscribed) continue;
-      if (conn.pendingEvents) conn.pendingEvents.push(event);
+      if (conn.pendingEvents) {
+        // 구독 snapshot을 만드는 동안 이벤트가 너무 많이 쌓이면 메모리를 지키기 위해 연결을 닫는다. 클라이언트는 다시 연결해 새 snapshot을 받는다 (감사 F-07)
+        if (conn.pendingEvents.length >= (this.o.maxPendingEvents ?? 1_000)) {
+          conn.pendingEvents = [];
+          conn.subscribed = false;
+          this.log(`구독 이벤트 대기열 초과 #${conn.id} — 연결을 닫아 다시 동기화하게 합니다`);
+          conn.ws.close(CLOSE.slowConsumer, 'resync required');
+          continue;
+        }
+        conn.pendingEvents.push(event);
+      }
       else this.send(conn, { type: 'event', event });
     }
   }

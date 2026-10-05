@@ -22,6 +22,13 @@
     "web:fixture": "tsx scripts/web-fixture.ts"
   },
   "devDependencies": {
+    "@deskpet/contracts": "workspace:*",
+    "@deskpet/gateways": "workspace:*",
+    "@deskpet/harness": "workspace:*",
+    "@deskpet/llm": "workspace:*",
+    "@deskpet/output": "workspace:*",
+    "@deskpet/projector": "workspace:*",
+    "@deskpet/server": "workspace:*",
     "@types/node": "^22.20.5",
     "@types/ws": "^8.18.2",
     "eslint": "^9.39.5",

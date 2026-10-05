@@ -8,6 +8,7 @@ import type {
   Pending,
   QuestionDeliveryEvidence,
 } from '@deskpet/contracts';
+import { deliveredQuestionMatches } from '@deskpet/contracts';
 import type { Clock, IdGen } from '../runtime/clock.js';
 import type {
   AckResult,
@@ -457,6 +458,10 @@ export class InMemoryOperationStore implements OperationStore {
           this.emitConfirmation(c);
         }
         return { ok: false, reason: 'expired', pending: clone(p) };
+      }
+      // 저장 경계에서도 다시 확인한다: 범위와 다른 문장으로 전달된 확인 질문의 답은 받지 않는다 (감사 F-01)
+      if (p.kind === 'confirmation' && p.scope && !deliveredQuestionMatches(p.scope, p.questionDeliveryEvidence.deliveredText)) {
+        return { ok: false, reason: 'question_not_delivered', pending: clone(p) };
       }
 
       const d = cmd.decision;

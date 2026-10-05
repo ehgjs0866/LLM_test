@@ -10,6 +10,8 @@ export type TransportReadQuery =
   | { kind: 'check_runs'; repository: Repository; prNumber: number; ref: string; page: number; perPage: number }
   | { kind: 'required_checks'; repository: Repository; baseRef: string }
   | { kind: 'reviews'; repository: Repository; prNumber: number; page: number; perPage: number }
+  /** 리뷰의 코드 줄 지적 (REST GET /pulls/{n}/comments). reviews의 본문과 별도로 모은다 */
+  | { kind: 'review_comments'; repository: Repository; prNumber: number; page: number; perPage: number }
   | { kind: 'viewer'; repository: Repository };
 
 export interface TransportReadResultMap {
@@ -24,6 +26,7 @@ export interface TransportReadResultMap {
     | { state: 'none_configured'; source?: RequiredChecksSource }
     | { state: 'unavailable'; reasonCode: RequiredChecksUnknownReason; detail: string };
   reviews: { reviews: Omit<ReviewItem, 'source'>[]; hasMore: boolean };
+  review_comments: { comments: { reviewId: string; path: string; line?: number; body: string; commitSha?: string; severity?: string }[]; hasMore: boolean };
   viewer: { login: string; permission: ViewerPermission };
 }
 

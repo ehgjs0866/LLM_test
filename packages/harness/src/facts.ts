@@ -34,9 +34,14 @@ export interface ReviewFacts {
   copilot?: {
     status: 'current' | 'stale_only' | 'none' | 'unavailable';
     reviewedSha?: string;
+    /** 코드 줄 지적만 (리뷰 본문 요약은 지적 수에 넣지 않는다) */
     comments: { path?: string; line?: number; severity?: string; body: string }[];
     blockingComments: number;
+    /** 코드 줄 지적 수집 범위. complete가 아니면 지적 수를 단정하지 않는다 (감사 F-06) */
+    commentCoverage?: 'complete' | 'partial' | 'unavailable' | 'not_collected';
   };
+  /** 변경 내용(diff) 수집 범위. MVP는 not_collected (파일·증감 줄 수만) */
+  patchCoverage?: 'complete' | 'partial' | 'unavailable' | 'not_collected';
   approvalBlockers: string[];
   /** 차단하지 않는 경고 (필수가 아닌 검사 실패·진행 중) */
   approvalWarnings: string[];
@@ -69,6 +74,7 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
       comparisonBase: changes.data.comparison.base,
       paths: changes.data.files.map((x) => x.path),
     };
+    if (changes.detailCoverage?.patches) f.patchCoverage = changes.detailCoverage.patches;
   }
   const checks = ctx.sections.find((s) => s.sectionKind === 'checks');
   if (checks?.sectionKind === 'checks' && checks.data) {
@@ -95,12 +101,14 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
       const cop = reviews.data.reviews.filter((r) => r.source === 'copilot');
       const current = cop.filter((r) => head && r.commitSha === head);
       if (current.length > 0) {
-        const comments = current.flatMap((r) => r.comments);
+        // 본문(summary)은 지적이 아니다. kind가 없는 옛 기록은 경로가 있을 때만 코드 지적으로 본다
+        const comments = current.flatMap((r) => r.comments).filter((x) => x.kind === 'inline' || (x.kind === undefined && !!x.path)).map(({ kind: _k, ...x }) => x);
         f.copilot = {
           status: 'current',
           reviewedSha: head!,
           comments,
           blockingComments: comments.filter((c) => ['high', 'critical', 'blocking'].includes(c.severity ?? '')).length,
+          commentCoverage: reviews.detailCoverage?.inlineComments ?? 'not_collected',
         };
       } else {
         f.copilot = { status: cop.length > 0 ? 'stale_only' : 'none', comments: [], blockingComments: 0 };

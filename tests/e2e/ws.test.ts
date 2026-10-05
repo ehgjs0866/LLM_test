@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { HarnessResult, OutputContent } from '@deskpet/contracts';
-import { OutputService } from '@deskpet/output';
+import { OutputService, mapHarnessResult } from '@deskpet/output';
 import { DirectHarnessInbound, HarnessWsServer } from '@deskpet/server';
 import { constraints, harnessRequest, prContext, voiceTurn } from '../support/builders.js';
 import { createWorld } from '../support/world.js';
@@ -13,9 +13,9 @@ afterEach(async () => {
   for (const s of servers.splice(0)) await s.stop(1_000);
 });
 
-async function boot(opts: { allowedOrigins?: string[]; maxPayloadBytes?: number } = {}) {
+async function boot(opts: { allowedOrigins?: string[]; maxPayloadBytes?: number; maxInFlightTotal?: number } = {}) {
   const w = createWorld();
-  const server = new HarnessWsServer({ inbound: new DirectHarnessInbound({ harness: w.harness, output: new OutputService() }), store: w.store, token: TOKEN, port: 0, helloTimeoutMs: 300, ...opts });
+  const server = new HarnessWsServer({ inbound: new DirectHarnessInbound({ harness: w.harness, output: new OutputService() }), store: w.store, token: TOKEN, port: 0, helloTimeoutMs: 300, now: () => w.clock.nowMs(), ...opts });
   servers.push(server);
   const { port } = await server.start();
   return { w, server, url: `ws://127.0.0.1:${port}` };
@@ -69,10 +69,10 @@ class TestClient {
     this.send({ type: 'hello', token, role });
     return this.waitFor((f) => f.type === 'welcome');
   }
-  envelope(kind: string, requestId: string, payload: unknown, o: { messageId?: string; deadline?: boolean; schemaVersion?: string } = {}) {
-    return { schemaVersion: o.schemaVersion ?? '1.0', messageId: o.messageId ?? `m-${++this.seq}-${Math.random().toString(36).slice(2)}`, kind, requestId, createdAt: '2026-10-04T10:00:00.000Z', ...(o.deadline === false ? {} : { deadlineAt: DEADLINE }), payload };
+  envelope(kind: string, requestId: string, payload: unknown, o: { messageId?: string; deadline?: boolean; deadlineAt?: string; schemaVersion?: string } = {}) {
+    return { schemaVersion: o.schemaVersion ?? '1.0', messageId: o.messageId ?? `m-${++this.seq}-${Math.random().toString(36).slice(2)}`, kind, requestId, createdAt: '2026-10-04T10:00:00.000Z', ...(o.deadline === false ? {} : { deadlineAt: o.deadlineAt ?? DEADLINE }), payload };
   }
-  async request(kind: string, requestId: string, payload: unknown, o: { messageId?: string; deadline?: boolean; schemaVersion?: string } = {}) {
+  async request(kind: string, requestId: string, payload: unknown, o: { messageId?: string; deadline?: boolean; deadlineAt?: string; schemaVersion?: string } = {}) {
     const env = this.envelope(kind, requestId, payload, o);
     this.send({ type: 'request', envelope: env });
     return this.waitFor((f) => f.type === 'reply' && f['causationId'] === env.messageId);
@@ -84,7 +84,8 @@ const reviewReq = (id: string) => harnessRequest(id, voiceTurn(`t-ws-${++turnN}`
 const approveReq = (id: string) => harnessRequest(id, voiceTurn(`t-ws-${++turnN}`, '좋아, 그 PR 승인해줘', { intention: 'pr.approve' }));
 
 async function deliver(c: TestClient, r: HarnessResult, n = 1) {
-  const reply = await c.request('pipeline.event', r.requestId, { messageId: `ev-${r.requestId}-${n}`, requestId: r.requestId, pendingId: r.pending!.pendingId, outputId: r.pending!.outputId, sourceRevision: n, occurredAt: '2026-10-04T10:00:01.000Z', kind: 'question_delivered', channel: 'speech' }, { deadline: false });
+  const deliveredText = (await new OutputService().generate(mapHarnessResult(r))).text;
+  const reply = await c.request('pipeline.event', r.requestId, { messageId: `ev-${r.requestId}-${n}`, requestId: r.requestId, pendingId: r.pending!.pendingId, outputId: r.pending!.outputId, sourceRevision: n, occurredAt: '2026-10-04T10:00:01.000Z', kind: 'question_delivered', channel: 'speech', deliveredText }, { deadline: false });
   expect(reply['payload']).toMatchObject({ applied: true });
 }
 const resumePayload = (r: HarnessResult, text: string, turnId: string) => ({
@@ -145,7 +146,7 @@ describe('Harness WebSocket 경계 — 인증·접근', () => {
 describe('Harness WebSocket 경계 — viewer 전용 토큰', () => {
   it('viewer 토큰으로는 viewer만 될 수 있다 (pipeline을 자칭하면 4001)', async () => {
     const w = createWorld();
-    const server = new HarnessWsServer({ inbound: new DirectHarnessInbound({ harness: w.harness, output: new OutputService() }), store: w.store, token: TOKEN, viewerToken: 'viewer-token-0123456789', port: 0 });
+    const server = new HarnessWsServer({ inbound: new DirectHarnessInbound({ harness: w.harness, output: new OutputService() }), store: w.store, token: TOKEN, viewerToken: 'viewer-token-0123456789', port: 0, now: () => w.clock.nowMs() });
     servers.push(server);
     const url = `ws://127.0.0.1:${(await server.start()).port}`;
     const v = new TestClient(url);
@@ -273,5 +274,37 @@ describe('Harness WebSocket 경계 — 상태 구독', () => {
     const ev = await viewer.waitFor((f) => f.type === 'event' && (f['event'] as { entityType?: string }).entityType === 'pending');
     expect(ev['event']).toMatchObject({ kind: 'operation.updated', epoch: welcome['epoch'] });
     expect(viewer.frames.findIndex((f) => f.type === 'snapshot')).toBeLessThan(viewer.frames.findIndex((f) => f.type === 'event'));
+  });
+});
+
+describe('Harness WebSocket 경계 — 봉투 검사 (감사 F-05)', () => {
+  it('봉투 requestId와 payload 요청이 다르면 실행 전에 거부한다', async () => {
+    const { url } = await boot();
+    const c = new TestClient(url);
+    await c.hello();
+    const reply = await c.request('harness.request', 'req-outer', approveReq('req-inner'));
+    expect(reply).toMatchObject({ ok: false, error: { code: 'invalid_message' } });
+    expect(JSON.stringify(reply['error'])).toContain('does not match payload');
+  });
+
+  it('기한이 지난 봉투는 실행하지 않는다 (승인 답변이어도 쓰기 0회)', async () => {
+    const { w, url } = await boot();
+    const c = new TestClient(url);
+    await c.hello();
+    const q = (await c.request('harness.request', 'req-exp', approveReq('req-exp')))['payload'] as HarnessResult;
+    await deliver(c, q);
+    const reply = await c.request('harness.resume', 'req-exp', resumePayload(q, '응, 승인해', 't-ws-exp'), { deadlineAt: '2026-10-04T09:59:00.000Z' });
+    expect(reply).toMatchObject({ ok: false, error: { code: 'deadline_exceeded' } });
+    expect(w.github.submitCount).toBe(0);
+  });
+});
+
+describe('Harness WebSocket 경계 — 서버 전체 상한 (감사 F-07)', () => {
+  it('서버 전체 동시 처리 상한에 걸리면 실행하지 않고 거부한다', async () => {
+    const { url } = await boot({ maxInFlightTotal: 0 });
+    const c = new TestClient(url);
+    await c.hello();
+    const reply = await c.request('harness.request', 'req-cap', reviewReq('req-cap'));
+    expect(reply).toMatchObject({ ok: false, error: { code: 'too_many_in_flight' } });
   });
 });

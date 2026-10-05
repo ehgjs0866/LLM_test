@@ -74,7 +74,7 @@ export interface Row {
 
 type Target = { kind?: string; repository?: { owner?: string; name?: string }; prNumber?: number; itemId?: string; stageId?: string };
 
-export function targetText(t: unknown): string {
+function targetText(t: unknown): string {
   const x = (t ?? {}) as Target;
   if (x.kind === 'github_pr') return `${x.repository?.owner}/${x.repository?.name} #${x.prNumber}`;
   if (x.kind === 'eureka_stage') return `Eureka ${x.itemId} / ${x.stageId}`;

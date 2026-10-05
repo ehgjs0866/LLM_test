@@ -84,6 +84,8 @@ function pendingAndConfirmation(expiresAt = '2026-10-04T10:02:00.000Z'): { pendi
 }
 
 const evidence = { inputChannel: 'voice' as const, sttConfidenceState: 'provided' as const, sttConfidence: 0.95 };
+/** 실제로 전달한 확인 질문 문장 (고정 범위 문구 포함) */
+const DELIVERED = { deliveredAt: T0, channel: 'speech' as const, sourceMessageId: 'ev-1', deliveredText: `${REPO.owner}/${REPO.name} PR ${PR}번, 현재 커밋 ${SHA_A.slice(0, 7)}을 승인할까요?` };
 
 
 describe.each(BACKENDS)('store backend: %s', (b) => {
@@ -258,11 +260,29 @@ describe.each(BACKENDS)('store backend: %s', (b) => {
       expect(r).toMatchObject({ ok: false, reason: 'question_not_delivered' });
     });
 
+    it('refuses an answer when the delivered sentence named a different target (audit F-01)', async () => {
+      const { store } = setup();
+      const { pending, conf } = pendingAndConfirmation();
+      await store.createPending(pending, conf);
+      const p = await store.markQuestionDelivered('p-1', 'out-1', { ...DELIVERED, deliveredText: '다른 저장소 Other/Repo PR 999번을 승인할까요?' });
+      const r = await store.atomicCommitAnswerAndClaim({
+        pendingId: 'p-1',
+        expectedPendingRevision: p!.revision,
+        requestId: 'req-1',
+        conversationId: 'conv-1',
+        answerTurnId: 't-2',
+        answeredAtMs: Date.parse(T0),
+        decision: { kind: 'confirmation', confirmationId: 'c-1', verdict: 'approved', evidence, rawText: '네', rationale: 'yes', prepare: writeCmd() },
+      });
+      expect(r).toMatchObject({ ok: false, reason: 'question_not_delivered' });
+      expect(await store.listOperations()).toHaveLength(0);
+    });
+
     it('approves, consumes pending and links exactly one operation atomically', async () => {
       const { store } = setup();
       const { pending, conf } = pendingAndConfirmation();
       await store.createPending(pending, conf);
-      const p = await store.markQuestionDelivered('p-1', 'out-1', { deliveredAt: T0, channel: 'speech', sourceMessageId: 'ev-1' });
+      const p = await store.markQuestionDelivered('p-1', 'out-1', DELIVERED);
       const cmd = {
         pendingId: 'p-1',
         expectedPendingRevision: p!.revision,
@@ -299,7 +319,7 @@ describe.each(BACKENDS)('store backend: %s', (b) => {
       const { store, clock } = setup();
       const { pending, conf } = pendingAndConfirmation('2026-10-04T10:01:00.000Z');
       await store.createPending(pending, conf);
-      const p = await store.markQuestionDelivered('p-1', 'out-1', { deliveredAt: T0, channel: 'speech', sourceMessageId: 'ev-1' });
+      const p = await store.markQuestionDelivered('p-1', 'out-1', DELIVERED);
       clock.advance(120_000);
       const r = await store.atomicCommitAnswerAndClaim({
         pendingId: 'p-1',
@@ -318,7 +338,7 @@ describe.each(BACKENDS)('store backend: %s', (b) => {
       const { store } = setup();
       const { pending, conf } = pendingAndConfirmation();
       await store.createPending(pending, conf);
-      await store.markQuestionDelivered('p-1', 'out-1', { deliveredAt: T0, channel: 'speech', sourceMessageId: 'ev-1' });
+      await store.markQuestionDelivered('p-1', 'out-1', DELIVERED);
       const p = await store.markSpeechStarted('p-1', T0);
       expect(p!.expiresAt).toBe(pending.expiresAt);
     });

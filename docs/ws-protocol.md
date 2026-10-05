@@ -1,6 +1,6 @@
 # Harness 서비스 경계 — WebSocket (`deskpet.harness.v1`)
 
-> 잠정 경계. 파이프라인(손한솔) 연결 시 수정한다. README는 수정하지 않았다.
+> 잠정 경계 (README D-15). 파이프라인(손한솔) 연결 시 수정한다.
 
 ## 구성
 
@@ -37,15 +37,18 @@
 | --- | --- | --- | --- |
 | `harness.request` | HarnessRequest | `harness.result` | deadlineAt 필수 |
 | `harness.resume` | HarnessResumeRequest | `harness.result` | deadlineAt 필수 |
-| `pipeline.event` | PipelineEvent | `pipeline.event.result` (`{applied, reason?}`) | 질문 전달·발화 시작 등 |
+| `pipeline.event` | PipelineEvent | `pipeline.event.result` (`{applied, reason?}`) | 질문 전달·발화 시작 등. 확인 질문의 `question_delivered`는 실제로 말한 문장 `deliveredText` 필수 |
 | `harness.cancel` | `{requestId, reason}` | `harness.cancel.result` | **명시적 취소만 취소** |
 | `output.from_result` | HarnessResult | `output.content` (OutputContent) | 서버가 매핑 후 출력 생성 |
 | `output.request` | OutputRequest | `output.content` | |
 
 응답: `{"type":"reply","causationId":"<요청 messageId>","requestId":"…","ok":true,"kind":"…","payload":…}`
-오류: `{"type":"reply","ok":false,"error":{"code":"invalid_message|forbidden|unsupported_kind|too_many_in_flight|shutting_down|internal","message":"…","issues":[…]}}`
+오류: `{"type":"reply","ok":false,"error":{"code":"invalid_message|forbidden|unsupported_kind|too_many_in_flight|deadline_exceeded|shutting_down|internal","message":"…","issues":[…]}}`
 
 - Envelope 검증 실패, 지원하지 않는 major(`2.x`), 받지 않는 kind는 **실행 전에** 거부.
+- 봉투 `requestId`와 payload의 요청(`requestId` / resume은 `originalRequestId` / output.request는 `requestRefs.requestId`)이 다르면 `invalid_message`.
+- 봉투 `deadlineAt`이 이미 지났으면 `deadline_exceeded`로 실행하지 않는다 (같은 messageId 재전달은 저장된 응답). 실행 deadline은 봉투와 payload deadline 중 이른 쪽.
+- 확인 질문 전달 보고(`question_delivered`)는 `deliveredText`에 코드가 만든 범위 문구(예: `NewLine/DeskPet PR 42번, 현재 커밋 a1b2c3d` + `승인`)가 그대로 있고 다른 저장소·PR·커밋이 없을 때만 반영된다. 아니면 `{applied:false, reason:"question_scope_mismatch" | "delivered_text_required"}`이고, 그 질문에 대한 답은 실행되지 않는다.
 - `internal` 오류는 원문을 응답에 넣지 않는다 (서버 로그에 오류 이름만). 다시 보내기 전에 상태를 확인할 것.
 
 ## 끊김·재전송 (중복 실행 방지)
@@ -70,6 +73,8 @@
 | 바인딩 | `127.0.0.1` |
 | 메시지 크기 | 256KB (초과 시 1009로 끊음) |
 | 연결당 동시 요청 | 8 |
+| 서버 전체 동시 요청 | 32 (`maxInFlightTotal`) |
+| 구독 snapshot 중 대기 이벤트 | 1,000 초과 시 그 연결을 4008로 끊어 다시 구독하게 함 (`maxPendingEvents`) |
 | 송신 버퍼 | 1MB 초과 시 느린 연결을 4008로 끊음 (Harness를 막지 않음) |
 | 종료 | SIGINT/SIGTERM → 새 요청 거부, 처리 중 요청 최대 30초 기다린 뒤 닫고 저장소 close |
 | 시작 | 저장소 열기 → 보존 정리 → 결과 확인이 필요한 쓰기를 읽기로만 확인 → 서버 시작 |
@@ -77,7 +82,9 @@
 ## 쓰기
 
 - 기본은 쓰기 비활성.
-- `pnpm harness --allow-github-writes`일 때만 GitHub 승인 전송 가능. 전송 직전마다 **서버 콘솔**에서 `yes` 입력 (TTY가 아니면 거절). 클라이언트는 건너뛸 수 없다.
+- `pnpm harness --allow-github-writes`일 때만 GitHub 승인 전송 가능. `DESKPET_STORE_PATH`(영속 저장소)가 없으면 시작하지 않는다.
+- 승인마다 **서버 콘솔**에서 `yes` 입력 (TTY가 아니면 거절). 클라이언트는 건너뛸 수 없다.
+- 운영자 확인은 DurableAck **전에** 묻고, 기다리는 시간은 요청 deadline과 60초 중 짧은 쪽이다. 시간 초과는 `DEADLINE_EXCEEDED`, 거절은 `cancelled` (둘 다 `not_sent`). `yes` 뒤에는 head SHA·PR 상태·권한·필수 검사를 다시 확인한 다음에만 보낸다.
 - Eureka 쓰기는 항상 꺼져 있다.
 
 ## 문서와 다른 점 (C-14)

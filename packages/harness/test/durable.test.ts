@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ConfirmationRecord, Pending } from '@deskpet/contracts';
-import { DEFAULT_POLICY, FakeClock, InMemoryOperationStore, SequentialIdGen, SqlitePersistence, StoreDispatchOwner, type IdGen, type PersistedRow, type PrepareCommand, type StorePersistence } from '@deskpet/harness';
+import { DEFAULT_POLICY, FakeClock, InMemoryOperationStore, SequentialIdGen, SqlitePersistence, StoreDispatchOwner, StoreLockedError, type IdGen, type PersistedRow, type PrepareCommand, type StorePersistence } from '@deskpet/harness';
 import { PR, REPO, SHA_A, T0 } from '../../../tests/support/builders.js';
 
 /** 실제 디스크(SQLite 파일)에 남는지, 다시 열었을 때 재전송 없이 복구되는지 검사한다 */
@@ -222,5 +222,34 @@ describe('실제 프로세스 강제 종료 (SIGKILL)', () => {
     const b = InMemoryOperationStore.openDurable(path, opts(idsWithPrefix('b')));
     expect((await b.getOperation(child.stdout.trim()))!.actionResult).toMatchObject({ status: 'failed', dispatchState: 'not_sent' });
     b.close();
+  });
+});
+
+describe('단일 기록자 잠금 (감사 F-04)', () => {
+  it('같은 DB 파일은 한 번에 하나만 쓰기용으로 열 수 있다', () => {
+    const path = tmpDb();
+    const a = InMemoryOperationStore.openDurable(path, opts());
+    expect(() => InMemoryOperationStore.openDurable(path, opts())).toThrow(StoreLockedError);
+    a.close();
+    const b = InMemoryOperationStore.openDurable(path, opts());
+    b.close();
+  });
+
+  it('같은 컴퓨터에서 이미 끝난 프로세스의 잠금은 넘겨받는다', () => {
+    const path = tmpDb();
+    InMemoryOperationStore.openDurable(path, opts()).close();
+    // 끝난 프로세스 pid를 얻는다
+    const dead = spawnSync(process.execPath, ['-e', '0']).pid!;
+    writeFileSync(`${path}.lock`, JSON.stringify({ pid: dead, host: hostname(), startedAt: T0 }));
+    const s = InMemoryOperationStore.openDurable(path, opts());
+    s.close();
+    expect(existsSync(`${path}.lock`)).toBe(false);
+  });
+
+  it('다른 컴퓨터 이름의 잠금은 넘겨받지 않는다', () => {
+    const path = tmpDb();
+    InMemoryOperationStore.openDurable(path, opts()).close();
+    writeFileSync(`${path}.lock`, JSON.stringify({ pid: 1, host: 'other-host', startedAt: T0 }));
+    expect(() => InMemoryOperationStore.openDurable(path, opts())).toThrow(/other-host/);
   });
 });

@@ -68,11 +68,36 @@ describe('RequestStateProjector', () => {
     const p = new RequestStateProjector();
     p.apply(upd('op-1', 3, { actionResult: { status: 'succeeded', dispatchState: 'sent' } }));
     const feed = new OutputProjectionFeed();
-    p.apply(feed.toUpdate({ kind: 'channel_failed', outputId: 'out-1', requestRefs: { requestId: 'req-1' }, channel: 'speech' }));
-    p.apply(feed.toUpdate({ kind: 'channel_completed', outputId: 'out-1', requestRefs: { requestId: 'req-1' }, channel: 'display' }));
+    p.apply(feed.toUpdate({ kind: 'channel_failed', outputId: 'out-1', requestRefs: { requestId: 'req-1' }, channel: 'speech' })!);
+    p.apply(feed.toUpdate({ kind: 'channel_completed', outputId: 'out-1', requestRefs: { requestId: 'req-1' }, channel: 'display' })!);
     const v = p.project();
     expect(v.operations[0]!.status).toBe('succeeded');
     expect(v.outputs[0]!.channels).toEqual({ speech: 'failed', display: 'completed' });
+  });
+
+  describe('OutputProjectionFeed 메모리·중복 (감사 F-07)', () => {
+    const ev = (outputId: string, kind: 'channel_started' | 'channel_completed' = 'channel_completed') => ({ kind, outputId, requestRefs: { requestId: 'req-1' }, channel: 'speech' as const });
+
+    it('같은 이벤트가 다시 와도 revision을 늘리지 않는다', () => {
+      const feed = new OutputProjectionFeed();
+      expect(feed.toUpdate(ev('o-1'))).not.toBeNull();
+      expect(feed.toUpdate(ev('o-1'))).toBeNull();
+    });
+
+    it('끝난 채널을 늦게 온 started로 되돌리지 않는다', () => {
+      const feed = new OutputProjectionFeed();
+      feed.toUpdate(ev('o-1'));
+      expect(feed.toUpdate(ev('o-1', 'channel_started'))).toBeNull();
+    });
+
+    it('최근 출력만 들고 있고, 지운 뒤 다시 와도 revision은 계속 커진다', () => {
+      const feed = new OutputProjectionFeed(1, 3);
+      const first = feed.toUpdate(ev('o-0'))!;
+      for (let i = 1; i <= 5; i++) feed.toUpdate(ev(`o-${i}`));
+      expect(feed.size).toBe(3);
+      const again = feed.toUpdate(ev('o-0'))!;
+      expect(again.revision).toBeGreaterThan(first.revision);
+    });
   });
 
   describe('snapshot scope = source 전체 (MVP)', () => {

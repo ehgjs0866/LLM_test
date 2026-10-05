@@ -1,4 +1,14 @@
-import { OutputRequest as OutputRequestSchema, type Emotion, type OutputContent, type OutputRequest } from '@deskpet/contracts';
+import {
+  OutputRequest as OutputRequestSchema,
+  allowedFromScope,
+  emptyAllowed,
+  foreignIdentifiers,
+  type AllowedIdentifiers,
+  type ConfirmationScope,
+  type Emotion,
+  type OutputContent,
+  type OutputRequest,
+} from '@deskpet/contracts';
 import { fallbackText } from './fallback.js';
 import { formatKoreanDateTime } from './format.js';
 import { OUTPUT_INSTRUCTIONS, buildOutputPrompt } from './prompt.js';
@@ -40,6 +50,10 @@ export class OutputService {
     const req = OutputRequestSchema.parse(raw);
     const statuses = req.actionResults.map((a) => ({ operationId: a.operationId, status: a.status }));
     const fb = this.fallback(req.facts, req);
+    // 성공하지 않은 쓰기 결과와 판정 대기는 모델로 바꿔 쓰지 않고 고정 상태 문장만 쓴다 (감사 F-02)
+    if (this.o.model && fixedStatusOnly(req)) {
+      return { ...fb, actionStatuses: statuses, validationResult: { passed: true, failures: [] }, fallbackUsed: true };
+    }
     if (this.o.model) {
       try {
         const draft = await withTimeout(
@@ -89,6 +103,8 @@ function checkSurface(raw: string, req: OutputRequest): string[] {
   if (!text) f.push('empty_text');
   if (text.length > req.constraints.maxSpeechChars) f.push('too_long');
   for (const token of req.requiredMeaning) if (!text.includes(token)) f.push(`missing_required:${token}`);
+  // 입력 사실에 없는 저장소·PR 번호·커밋을 섞으면 안 된다 (감사 F-02)
+  for (const x of foreignIdentifiers(text, allowedIdentifiers(req))) f.push(`foreign_identifier:${x}`);
   for (const a of req.actionResults) {
     const re = SUCCESS_PHRASES[a.action];
     if (re && a.status !== 'succeeded' && re.test(text)) f.push(`success_claim_without_success:${a.action}`);
@@ -101,6 +117,45 @@ function checkSurface(raw: string, req: OutputRequest): string[] {
   return f;
 }
 
+
+const WRITE_ACTIONS = new Set(['submit_approval', 'complete_stage']);
+
+/** 모델 문장을 쓰지 않을 결과: 성공하지 않은 쓰기 작업 또는 판정 대기 */
+export function fixedStatusOnly(req: OutputRequest): boolean {
+  if (req.facts['assessmentPending']) return true;
+  return req.actionResults.some((a) => WRITE_ACTIONS.has(a.action) && a.status !== 'succeeded');
+}
+
+/** 출력 요청 사실에 들어 있는 저장소·PR 번호·커밋. 모델 문장의 식별자는 이 안에 있어야 한다 */
+export function allowedIdentifiers(req: OutputRequest): AllowedIdentifiers {
+  const allowed = emptyAllowed();
+  const scope = (req.facts['question'] as { scope?: ConfirmationScope } | undefined)?.scope;
+  if (scope) allowedFromScope(scope, allowed);
+  for (const a of req.actionResults) {
+    if (a.target.kind === 'github_pr') {
+      allowed.repositories.add(`${a.target.repository.owner}/${a.target.repository.name}`.toLowerCase());
+      allowed.prNumbers.add(a.target.prNumber);
+    }
+  }
+  collect(req.facts, allowed, 0);
+  return allowed;
+}
+
+function collect(v: unknown, into: AllowedIdentifiers, depth: number): void {
+  if (depth > 6 || v === null || typeof v !== 'object') return;
+  if (Array.isArray(v)) {
+    for (const x of v) collect(x, into, depth + 1);
+    return;
+  }
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (k === 'repository') {
+      if (typeof x === 'string') into.repositories.add(x.toLowerCase());
+      else if (x && typeof x === 'object' && 'owner' in x && 'name' in x) into.repositories.add(`${String((x as { owner: unknown }).owner)}/${String((x as { name: unknown }).name)}`.toLowerCase());
+    } else if (k === 'prNumber' && typeof x === 'number') into.prNumbers.add(x);
+    else if (/sha$|^commitId$/i.test(k) && typeof x === 'string' && x) into.shas.add(x);
+    else collect(x, into, depth + 1);
+  }
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise((resolve, reject) => {

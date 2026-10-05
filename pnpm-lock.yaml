@@ -8,6 +8,27 @@ importers:
 
   .:
     devDependencies:
+      '@deskpet/contracts':
+        specifier: workspace:*
+        version: link:packages/contracts
+      '@deskpet/gateways':
+        specifier: workspace:*
+        version: link:packages/gateways
+      '@deskpet/harness':
+        specifier: workspace:*
+        version: link:packages/harness
+      '@deskpet/llm':
+        specifier: workspace:*
+        version: link:packages/llm
+      '@deskpet/output':
+        specifier: workspace:*
+        version: link:packages/output
+      '@deskpet/projector':
+        specifier: workspace:*
+        version: link:packages/projector
+      '@deskpet/server':
+        specifier: workspace:*
+        version: link:packages/server
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5

@@ -32,6 +32,7 @@ export type ErrorCode =
   | 'invalid_message'
   | 'unsupported_kind'
   | 'too_many_in_flight'
+  | 'deadline_exceeded'
   | 'shutting_down'
   | 'internal';
 

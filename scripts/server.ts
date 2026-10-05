@@ -3,7 +3,8 @@
  * Harness 서비스 서버 (WebSocket). 파이프라인·데모 클라이언트·웹 화면이 이 서버에 연결한다.
  *
  *   pnpm harness                          # 쓰기 비활성 (GitHub 승인·Eureka 완료 요청은 보내지 않음)
- *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 전송 직전마다 이 서버 콘솔에서 yes 입력 필요
+ *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 전송 직전마다 이 서버 콘솔에서 yes 입력 필요.
+ *                                         # DESKPET_STORE_PATH(영속 저장소) 필수. 같은 DB는 한 프로세스만 연다 (<DB>.lock)
  *
  * .env
  *   HARNESS_WS_TOKEN (필수, 16자 이상 — 클라이언트 hello 인증), HARNESS_WS_HOST(기본 127.0.0.1), HARNESS_WS_PORT(기본 8787),
@@ -14,10 +15,10 @@
  */
 import { createInterface } from 'node:readline/promises';
 import { createEurekaRestGateway, GitHubReviewGateway, parseRequiredChecksFallback, RestGitHubTransport } from '@deskpet/gateways';
-import { DEFAULT_POLICY, HarnessService, InMemoryOperationStore, randomIdGen, systemClock } from '@deskpet/harness';
+import { DEFAULT_POLICY, HarnessService, InMemoryOperationStore, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
 import { createLlmFromEnv } from '@deskpet/llm';
 import { OutputService } from '@deskpet/output';
-import { DirectHarnessInbound, HarnessWsServer, OperatorGatedTransport } from '@deskpet/server';
+import { ConsoleOperatorConfirm, DirectHarnessInbound, HarnessWsServer } from '@deskpet/server';
 
 try {
   process.loadEnvFile('.env');
@@ -46,24 +47,40 @@ const storeOpts = {
   maxRecoveryAttempts: config.maxRecoveryAttempts,
 };
 const storePath = env['DESKPET_STORE_PATH']?.trim();
-const store = storePath ? InMemoryOperationStore.openDurable(storePath, storeOpts) : new InMemoryOperationStore(storeOpts);
+// 쓰기 모드는 영속 저장소가 있어야 한다: 메모리 저장소는 재시작 뒤 '보냈을 수 있는' 승인을 기억하지 못해 중복 전송을 막지 못한다 (감사 F-04)
+if (allowGithubWrites && !storePath) fail('--allow-github-writes는 DESKPET_STORE_PATH(영속 저장소)가 있어야 켤 수 있어요');
+const openStore = (): InMemoryOperationStore => {
+  try {
+    return storePath ? InMemoryOperationStore.openDurable(storePath, storeOpts) : new InMemoryOperationStore(storeOpts);
+  } catch (e) {
+  // 같은 DB를 다른 Harness 프로세스가 쓰고 있으면 시작하지 않는다 (단일 기록자)
+    return fail(e instanceof StoreLockedError ? `저장소를 다른 Harness 프로세스가 쓰고 있어요 (${e.holder}). 그 프로세스를 끄거나, 이미 끝났다면 ${e.lockPath} 파일을 지우세요.` : `저장소를 열지 못했어요: ${e instanceof Error ? e.message : String(e)}`);
+  }
+};
+const store = openStore();
 
-/** 서버 콘솔 확인 (TTY가 아니면 거절) */
-const consolePrompt = async (lines: string[], question: string) => {
+/** 서버 콘솔 확인 (TTY가 아니면 거절). 시간이 지나면 입력을 취소한다 */
+const consolePrompt = async (lines: string[], question: string, signal: AbortSignal) => {
   console.log(`\n${lines.join('\n')}`);
   if (!process.stdin.isTTY) {
     console.log('  (터미널 입력을 받을 수 없어 거절합니다)');
     return '';
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const a = await rl.question(question);
-  rl.close();
-  return a;
+  try {
+    return await rl.question(question, { signal });
+  } catch {
+    console.log('\n  (확인 시간이 지나 보내지 않습니다)');
+    return '';
+  } finally {
+    rl.close();
+  }
 };
 const github = new GitHubReviewGateway({
-  transport: new OperatorGatedTransport(new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites }), consolePrompt),
+  transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites }),
   now: () => Date.now(),
   requiredChecksFallback: parseRequiredChecksFallback(env['DESKPET_REQUIRED_CHECKS']),
+  ...(allowGithubWrites ? { operatorConfirm: new ConsoleOperatorConfirm({ prompt: consolePrompt }) } : {}),
 });
 const eureka = createEurekaRestGateway(env, undefined, { allowWrites: false });
 const llm = createLlmFromEnv(env);

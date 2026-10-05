@@ -47,21 +47,38 @@ export function snapshotFromHarness(r: HarnessSnapshotRecords, epoch: number, to
 
 /**
  * 출력 채널 상태 누적 (파이프라인 원본). 출력 실패는 업무 결과와 독립적으로 표시한다.
- * inference: 파이프라인이 outputId별 revision을 부여한다고 가정한다.
+ *
+ * 감사 F-07:
+ * - 같은 내용의 이벤트가 다시 와도 새 revision을 만들지 않는다 (null 반환).
+ * - 채널이 completed/failed로 끝난 뒤 늦게 도착한 started는 무시한다.
+ * - revision은 피드 전체에서 단조 증가하는 번호라, 오래된 항목을 지운 뒤 같은 outputId가 다시 와도 투영에서 낡은 값으로 버려지지 않는다.
+ * - 최근 maxEntries개 출력만 메모리에 둔다.
  */
 export class OutputProjectionFeed {
   private states = new Map<string, { revision: number; requestId: string; text: string | null; channels: Record<string, string> }>();
-  constructor(private readonly epoch = 1) {}
+  private seq = 0;
 
-  toUpdate(e: OutputEvent): OperationUpdated {
+  constructor(
+    private readonly epoch = 1,
+    private readonly maxEntries = 500,
+  ) {}
+
+  toUpdate(e: OutputEvent): OperationUpdated | null {
     const cur = this.states.get(e.outputId) ?? { revision: 0, requestId: e.requestRefs.requestId, text: null, channels: {} };
-    const next = { ...cur, channels: { ...cur.channels }, revision: cur.revision + 1 };
+    const next = { ...cur, channels: { ...cur.channels } };
     if (e.kind === 'content_ready') next.text = (e.content as OutputContent).text;
     if (e.kind === 'content_failed') next.channels['content'] = 'failed';
     if (e.kind === 'channel_started' || e.kind === 'channel_completed' || e.kind === 'channel_failed') {
-      next.channels[e.channel] = e.kind.replace('channel_', '');
+      const prev = next.channels[e.channel];
+      const to = e.kind.replace('channel_', '');
+      // 끝난 채널을 진행 중으로 되돌리지 않는다
+      if (!(to === 'started' && (prev === 'completed' || prev === 'failed'))) next.channels[e.channel] = to;
     }
+    if (cur.revision > 0 && next.text === cur.text && sameChannels(next.channels, cur.channels)) return null;
+    next.revision = ++this.seq;
+    this.states.delete(e.outputId);
     this.states.set(e.outputId, next);
+    while (this.states.size > this.maxEntries) this.states.delete(this.states.keys().next().value!);
     return {
       kind: 'operation.updated',
       source: 'pipeline',
@@ -73,4 +90,13 @@ export class OutputProjectionFeed {
       relatedIds: { requestId: next.requestId },
     };
   }
+
+  get size(): number {
+    return this.states.size;
+  }
+}
+
+function sameChannels(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ka = Object.keys(a);
+  return ka.length === Object.keys(b).length && ka.every((k) => a[k] === b[k]);
 }

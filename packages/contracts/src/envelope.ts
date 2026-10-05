@@ -69,7 +69,52 @@ export function parseEnvelope(input: unknown): ParseResult<Envelope> {
   const schema = PAYLOAD_BY_KIND[h.kind] as z.ZodTypeAny;
   const payload = schema.safeParse(h.payload);
   if (!payload.success) return { ok: false, issues: payload.error.issues.map((i) => `payload.${fmt(i)}`) };
+  // 봉투와 payload가 서로 다른 요청을 가리키면 실행하지 않는다 (감사 F-05)
+  const inner = payloadRequestId(h.kind, payload.data);
+  if (inner !== undefined && inner !== h.requestId) {
+    return { ok: false, issues: [`requestId: envelope requestId does not match payload (${inner})`] };
+  }
   return { ok: true, value: { ...h, payload: payload.data } as Envelope };
+}
+
+/** payload가 가리키는 요청 ID. 봉투 requestId와 같아야 한다. 해당 필드가 없는 kind는 undefined */
+export function payloadRequestId(kind: EnvelopeKind, payload: unknown): string | undefined {
+  const p = (payload ?? {}) as Record<string, unknown>;
+  switch (kind) {
+    case 'harness.request':
+    case 'harness.cancel':
+    case 'harness.result':
+    case 'output.from_result':
+    case 'pipeline.event':
+      return typeof p['requestId'] === 'string' ? p['requestId'] : undefined;
+    case 'harness.resume':
+      return typeof p['originalRequestId'] === 'string' ? p['originalRequestId'] : undefined;
+    case 'output.request': {
+      const refs = p['requestRefs'] as { requestId?: unknown } | undefined;
+      return typeof refs?.requestId === 'string' ? refs.requestId : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 봉투 deadline과 payload 안 실행 deadline 중 이른 쪽을 실행 deadline으로 쓴다 (감사 F-05).
+ * 봉투에 deadline이 없거나 payload deadline이 더 이르면 그대로 둔다.
+ */
+export function clampPayloadDeadline(env: Envelope): Envelope {
+  if (!env.deadlineAt) return env;
+  const outer = Date.parse(env.deadlineAt);
+  const clamp = (c: { deadlineAt: string }) => (Date.parse(c.deadlineAt) > outer ? { ...c, deadlineAt: env.deadlineAt! } : c);
+  if (env.kind === 'harness.request') {
+    const p = env.payload as Envelope<'harness.request'>['payload'];
+    return { ...env, payload: { ...p, constraints: clamp(p.constraints) } } as Envelope;
+  }
+  if (env.kind === 'harness.resume') {
+    const p = env.payload as Envelope<'harness.resume'>['payload'];
+    return { ...env, payload: { ...p, newCallConstraints: clamp(p.newCallConstraints) } } as Envelope;
+  }
+  return env;
 }
 
 export function makeEnvelope<K extends EnvelopeKind>(
