@@ -59,6 +59,8 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm check` | vitest / tsc(패키지 + 웹) / eslint / 셋 다 |
 | `pnpm smoke [eureka\|github\|llm]` | 연결 테스트. Eureka·GitHub는 읽기만, llm은 작은 호출 2번 |
 | `pnpm harness [--allow-github-writes]` | Harness 서버. 시작 시 보존 정리·결과 불명 쓰기 읽기 확인, Ctrl+C 시 처리 중 요청을 마치고 종료 |
+| `pnpm demo:adapter [--fixture] <명령>` | 파이프라인 문서 형식(adapter) 시험 클라이언트: `reminders`, `reminder <itemId>`, `eureka list`, `eureka status "업무"`, `eureka postpone "업무" <ISO+09:00> [--approve]`, `harness [PR]`. `--fixture`는 `pnpm web:fixture` 서버(가짜 GitHub·Eureka)에 붙음 |
+| `pnpm wiki "질의" [--dir <vault>]` | LLM Wiki 검색 확인 (읽기 전용). Guide에 넘길 발췌·출처를 그대로 보여 줌 |
 | `pnpm demo [PR] [--answer "…"] [--ask "…" --intent …]` | 데모 클라이언트 (서버가 켜져 있어야 함) |
 | `pnpm db [ops\|op <id>\|pending\|dedup\|turns\|raw …]` | 저장소 조회 (읽기 전용, 기록을 바꾸지 않음) |
 | `pnpm web:dev` / `pnpm web:build` | 웹 화면 개발 서버 / 빌드 |
@@ -87,7 +89,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
   - 운영자 확인은 DurableAck 전에 묻고 deadline 안(최대 60초)에서만 기다린다. `yes` 뒤 PR 상태를 다시 확인하고 보낸다.
 - 확인 질문의 답은 **실제로 전달한 문장**이 저장된 범위(저장소·PR·커밋·행위)와 맞을 때만 받는다. 출력 모델은 이 범위 문구를 바꿀 수 없고, 성공하지 않은 쓰기 결과는 모델 문장 없이 고정 문장으로만 알린다.
 - 봉투 deadline이 지났거나 봉투·payload의 요청 ID가 다르면 실행하지 않는다.
-- Eureka 쓰기는 항상 꺼져 있다. 시험하려면 별도 허락이 필요하다.
+- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발 환경(flw-d1)에서만 보낼 수 있고 GitHub와 같이 전송 직전마다 서버 콘솔 `yes`가 필요하다 (D-20).
 - 본인이 연 PR은 GitHub 규칙상 승인할 수 없어 확인 질문 전에 막힌다.
 
 ## 실제 연결 기록
@@ -131,7 +133,9 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | D-15 | Harness 서비스 경계는 WebSocket `deskpet.harness.v1`. 본문은 기존 Envelope, 수신 변환 층은 지금 Harness 입력을 그대로 전달 (`docs/ws-protocol.md`) | 사용자 결정 2026-10-05 |
 | D-16 | 투영 snapshot 범위는 source 전체로 제한 (vault message-contracts에 사용자 요청으로 한 문장 추가) | 사용자 결정 2026-10-05 |
 | D-17 | 웹 화면은 보기 전용. 서버의 viewer 전용 토큰으로만 접속하고 변경 기능은 없다 (`docs/web-ui.md`) | 구현 |
-| D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만, 전송 직전마다 서버 콘솔 `yes` 확인. Eureka 쓰기는 항상 꺼짐 | 사용자 결정 2026-10-05 |
+| D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만, 전송 직전마다 서버 콘솔 `yes` 확인 | 사용자 결정 2026-10-05 |
+| D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발 환경(flw-d1)에서만**, 전송 직전마다 서버 콘솔 `yes` 확인(ack 전, yes 뒤 단계 상태 재확인). 영속 저장소 필수 | 사용자 결정 2026-10-12 (실제 시험 허락) |
+| D-19 | LLM Wiki: `wiki/` + 프로젝트 README만 키워드·frontmatter로 검색. Guide 판단 참고와 **출력 모델의 배경 설명**에 쓰고(2026-10-12 갱신), LLM에는 발췌 3개·1,500자까지. 대상 특정·승인 근거로는 쓰지 않음 (`docs/llm-integration.md` L-10). `FileWikiReader` + Guide `search_wiki` 단계, `.env` `DESKPET_WIKI_DIR` | 사용자 결정 2026-10-12 / 구현 |
 
 ## 문서 충돌과 잠정 처리
 
@@ -151,6 +155,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | C-12 | LLM 호출 경로: OpenAI·Gemini 직접 호출 vs 손한솔 담당 원격 fallback API | 직접 어댑터로 개발. fallback은 어댑터 추가로 전환 (미정) |
 | C-13 | 기술 스택 문서는 출력 체인을 LangChain으로 정함 | 기본 출력 경로는 공급자 중립 `LlmOutputModel`, LangChain은 `LLM_OUTPUT_CHAIN=langchain`(openai) 옵션 (보고) |
 | C-14 | 기술 스택 문서의 보드 내 프로세스 통신 후보는 gRPC·ZeroMQ, 구현은 WebSocket | 변환 층을 전송과 분리. 파이프라인 담당자와 합의 필요 |
+| C-15 | pipeline·interface-contracts 문서는 Harness가 `question` 문장과 `mutationApproved`로 승인을 주고받는다. message-contracts·Liability는 Harness가 완성 문장을 만들지 않고 pending·confirmation·전달 증거를 요구한다 | 경계 형식은 pipeline 문서를 따르고(`harness.run`), 문장은 고정 문구로 만들며, 승인은 `mutationApproved`와 Harness 검사·전달 증거를 모두 요구 (사용자 결정 2026-10-12) |
 
 ## 시나리오 커버리지 (fake Gateway, `tests/e2e`)
 
@@ -189,7 +194,8 @@ S-02(다중 후보), S-03(Copilot 리뷰 없음·오래됨), S-12(쓰다듬기)�
 - 자동 복구 주기·횟수 상한, 저장 용량·보존 기간 수치 (지금은 자리값)
 - 에러 코드명(실제 API 응답을 본 뒤 동결), 직접 Eureka 경로의 행위별 사용자 확인 정책
 - GitHub MCP 사용 여부 (지금은 REST), Eureka 응답 스키마 세부와 페이지네이션(limit=100 초과)
-- 파이프라인과의 경계 형식·transport (C-14), LLM 호출 경로·외부로 보내는 데이터 범위 (C-12), 출력 체인 (C-13)
+- 파이프라인 문서에 없는 경계 항목 P-01~P-18 (`docs/pipeline-bridge.md`)
+- 파이프라인과의 transport (C-14), LLM 호출 경로·외부로 보내는 데이터 범위 (C-12), 출력 체인 (C-13)
 - 라우터 intention 값 목록과 그중 LLM이 맡을 의도, 확인 답변 허용 단어
 - 판정 대기 재판정(`reassess`)으로 승인 성공이 나온 뒤 Eureka 후속 질문 자동 시작
 - PR 변경 내용(diff) 수집 범위와 상한 (지금은 파일·증감 줄 수만, `docs/audit-fixes.md`)
@@ -198,8 +204,9 @@ S-02(다중 후보), S-03(Copilot 리뷰 없음·오래됨), S-12(쓰다듬기)�
 
 | 문서 | 내용 |
 | --- | --- |
+| `docs/pipeline-bridge.md` | 파이프라인 문서 형식(`harness.run`·`output.generate`·`eureka.*`) 연결, 문서에 없어 임시로 정한 P-01~P-18 |
 | `docs/audit-fixes.md` | 2026-10-05 구현 감사 F-01~F-07 처리와 남은 결정 |
-| `docs/connection-test-issues.md` | 실제 연결에서 나온 문제와 해결 (1~13) |
+| `docs/connection-test-issues.md` | 실제 연결에서 나온 문제와 해결 (1~14) |
 | `docs/llm-integration.md` | LLM 결정 L-01~L-09, 안전 경계, 어댑터 추가 방법 |
 | `docs/persistent-store.md` | SQLite 저널, 재시작 복구, 보존 정책, `pnpm db` |
 | `docs/ws-protocol.md` | WebSocket 프레임, 인증·역할, 끊김·재전송, 구독 |

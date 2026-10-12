@@ -1,7 +1,7 @@
-import type { OperatorConfirm, OperatorVerdict } from '@deskpet/gateways';
+import type { EurekaOperatorConfirm, OperatorConfirm, OperatorVerdict } from '@deskpet/gateways';
 
 /**
- * 운영자 확인 게이트 (서버 콘솔). GitHub 쓰기를 서버 실행 옵션으로 켠 경우에만 쓴다.
+ * 운영자 확인 게이트 (서버 콘솔). GitHub·Eureka 쓰기를 서버 실행 옵션으로 켠 경우에만 쓴다.
  *
  * - Gateway가 DurableAck 전에 부른다 (감사 F-03). 정확히 `yes`를 입력해야 승인이고, 그 뒤 Gateway가 대상 상태를 다시
  *   확인한 다음에만 ack·전송한다.
@@ -26,7 +26,14 @@ export class ConsoleOperatorConfirm implements OperatorConfirm {
     this.now = o.now ?? (() => Date.now());
   }
 
-  confirm: OperatorConfirm['confirm'] = (cmd, c) => {
+  confirm: OperatorConfirm['confirm'] = (cmd, c) =>
+    this.confirmLines(
+      ['⚠ 실제 GitHub 승인 요청을 보내려고 합니다.', `  저장소: ${cmd.repository.owner}/${cmd.repository.name}  PR: #${cmd.prNumber}`, `  커밋: ${cmd.commitId}  행위: ${cmd.event}`],
+      c,
+    );
+
+  /** 대상 설명 줄을 보여 주고 yes를 기다린다 (GitHub·Eureka 공용) */
+  confirmLines(lines: string[], c: { deadlineAt: string; signal?: AbortSignal }): Promise<OperatorVerdict> {
     const run = async (): Promise<OperatorVerdict> => {
       const waitMs = Math.min(Date.parse(c.deadlineAt) - this.now(), this.o.maxWaitMs ?? 60_000);
       if (!(waitMs > 0) || c.signal?.aborted) return 'timeout';
@@ -38,16 +45,10 @@ export class ConsoleOperatorConfirm implements OperatorConfirm {
         // prompt가 signal을 무시해도 시간 초과로 끝나도록 경합시킨다
         const aborted = new Promise<never>((_, reject) => ac.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
         aborted.catch(() => undefined);
-        const typed = await Promise.race([aborted, this.o.prompt(
-          [
-            '⚠ 실제 GitHub 승인 요청을 보내려고 합니다.',
-            `  저장소: ${cmd.repository.owner}/${cmd.repository.name}  PR: #${cmd.prNumber}`,
-            `  커밋: ${cmd.commitId}  행위: ${cmd.event}`,
-            `  ${Math.ceil(waitMs / 1000)}초 안에 답하지 않으면 보내지 않습니다.`,
-          ],
-          '  보내려면 yes를 입력하세요 (그 외 입력은 취소): ',
-          ac.signal,
-        )]);
+        const typed = await Promise.race([
+          aborted,
+          this.o.prompt([...lines, `  ${Math.ceil(waitMs / 1000)}초 안에 답하지 않으면 보내지 않습니다.`], '  보내려면 yes를 입력하세요 (그 외 입력은 취소): ', ac.signal),
+        ]);
         if (ac.signal.aborted) return 'timeout';
         return typed.trim() === 'yes' ? 'approved' : 'declined';
       } catch {
@@ -60,5 +61,13 @@ export class ConsoleOperatorConfirm implements OperatorConfirm {
     const p = this.queue.then(run, run);
     this.queue = p.catch(() => undefined);
     return p;
-  };
+  }
+
+  /** Eureka 쓰기용 확인 (EurekaGateway.operatorConfirm) */
+  forEureka(): EurekaOperatorConfirm {
+    return {
+      confirm: (w, c) =>
+        this.confirmLines(['⚠ 실제 Eureka 쓰기 요청을 보내려고 합니다.', `  행위: ${w.action}  대상: ${w.target}`, `  요청: ${w.method} ${w.path} ${w.body ? JSON.stringify(w.body) : ''}`], c),
+    };
+  }
 }

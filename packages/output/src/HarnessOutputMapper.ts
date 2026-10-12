@@ -29,7 +29,8 @@ export function mapHarnessResult(r: HarnessResult, ctx: OutputContext = {}): Out
     facts: { ...r.facts, disposition: r.disposition, processingErrors: r.processingErrors.map((e) => e.provisionalCode) },
     sources: r.sources,
     requiredMeaning: requiredMeaning(r),
-    constraints: { language: 'ko-KR', maxSpeechChars: ctx.maxSpeechChars ?? 220, allowedEmotions: ctx.allowedEmotions ?? ALL_EMOTIONS },
+    // 팀 문서 배경을 함께 말할 때는 조금 더 길게 허용한다
+    constraints: { language: 'ko-KR', maxSpeechChars: ctx.maxSpeechChars ?? (r.facts['wiki'] ? 360 : 220), allowedEmotions: ctx.allowedEmotions ?? ALL_EMOTIONS },
     ...(isQuestion ? { pendingId: r.pending!.pendingId } : {}),
     ...(isQuestion && r.pending!.confirmationId ? { confirmationId: r.pending!.confirmationId } : {}),
   };

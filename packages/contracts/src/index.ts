@@ -11,3 +11,4 @@ export * from './ports.js';
 export * from './reviewPolicy.js';
 export * from './llm.js';
 export * from './confirmation.js';
+export * from './pipelineBridge.js';

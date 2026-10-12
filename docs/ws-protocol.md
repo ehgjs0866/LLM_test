@@ -41,6 +41,11 @@
 | `harness.cancel` | `{requestId, reason}` | `harness.cancel.result` | **명시적 취소만 취소** |
 | `output.from_result` | HarnessResult | `output.content` (OutputContent) | 서버가 매핑 후 출력 생성 |
 | `output.request` | OutputRequest | `output.content` | |
+| `harness.run` | 파이프라인 문서 HarnessRequest | `harness.run.result` | deadlineAt 필수. `docs/pipeline-bridge.md` |
+| `harness.reconcile` | 파이프라인 문서 ActionRequest | `action.result` | 다시 보내지 않고 조회로만 확인 |
+| `output.generate` | 파이프라인 문서 OutputRequest | `output.text` (`{text}`) | requiredText 유지 |
+| `eureka.execute` / `eureka.reconcile` | 파이프라인 문서 ActionRequest | `action.result` | 직접 Eureka 경로. 쓰기는 mutationApproved 필요 |
+| `eureka.reminders` / `eureka.reminder` | `{requestId}` / `{requestId, itemId}` | `eureka.reminders.result` / `eureka.reminder.result` | 읽기 전용 |
 
 응답: `{"type":"reply","causationId":"<요청 messageId>","requestId":"…","ok":true,"kind":"…","payload":…}`
 오류: `{"type":"reply","ok":false,"error":{"code":"invalid_message|forbidden|unsupported_kind|too_many_in_flight|deadline_exceeded|shutting_down|internal","message":"…","issues":[…]}}`

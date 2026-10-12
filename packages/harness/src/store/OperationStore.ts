@@ -123,6 +123,10 @@ export interface ProjectionSnapshotRecords {
 }
 
 export interface OperationStore {
+  // -- 파이프라인 문서 경계용 조회 (답변 연결)
+  listWaitingPendingsByConversation(conversationId: string): Promise<Pending[]>;
+  getConfirmationForPending(pendingId: string): Promise<ConfirmationRecord | undefined>;
+
   // -- operation 준비·전송 경계
   reserveAndPrepare(cmd: PrepareCommand): Promise<PrepareResult>;
   persistMayHaveBeenSent(authority: ExecutionAuthority & { operationId: string }): Promise<AckResult>;

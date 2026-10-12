@@ -189,7 +189,9 @@ export class HarnessService {
       // 없는 오래된 확인 ID로 새 실행을 허용하지 않는다
       return this.processingFailure(meta.requestId, 'CONFIRMATION_INVALID', 'confirmation not found for pending');
     }
-    const answer = classifyAnswer(req.currentTurn, this.cfg);
+    let answer = classifyAnswer(req.currentTurn, this.cfg);
+    // 파이프라인이 승인으로 판단하지 않았으면(mutationApproved=false) 쓰기를 하지 않는다. 거절은 그대로 거절
+    if (answer.verdict === 'approved' && req.externalApproval === false) answer = { verdict: 'unclear', rationale: 'pipeline did not mark the answer as approval (mutationApproved=false)' };
     const evidence = {
       inputChannel: req.currentTurn.inputChannel,
       sttConfidenceState: req.currentTurn.sttConfidenceState,
@@ -429,10 +431,17 @@ export class HarnessService {
           context: { packet: ctx, wiki, unverified: [] },
           operations: [],
           confirmations: [],
-          constraints: { deadlineAt: constraints.deadlineAt, policyVersion: this.cfg.policyVersion, maxSteps: this.cfg.maxGuideSteps },
+          constraints: {
+            deadlineAt: constraints.deadlineAt,
+            policyVersion: this.cfg.policyVersion,
+            maxSteps: this.cfg.maxGuideSteps,
+            wikiSearchAllowed: constraints.wikiSearchAllowed !== false && !!this.d.wiki,
+          },
           facts: facts as Record<string, unknown>,
         });
         decision = GuideDecisionSchema.parse(decision);
+        const stepRef = decision.reasonRefs.find((r) => r.startsWith('llm:') || r.startsWith('llm_')) ?? `rule:${decision.kind}`;
+        facts.guideSteps = [...(facts.guideSteps ?? []), stepRef];
       } catch (e) {
         // 가이드 오류는 도구를 실행하지 않고 처리 오류로 종료한다
         return this.result(meta, 'failed', actionResults, exportFacts(facts), { errors: [errorInfo('harness.guide', 'GUIDE_ERROR', e instanceof Error ? e.message : 'guide error', 'none')], sources });
@@ -459,13 +468,19 @@ export class HarnessService {
           break;
         }
         case 'need_context': {
-          if (this.d.wiki) {
+          // Wiki는 Guide 판단 참고 자료일 뿐이다 (D-19). 파이프라인이 허용하지 않으면 검색하지 않는다
+          if (constraints.wikiSearchAllowed === false) {
+            wiki = { outcome: 'not_queried', excerpts: [] };
+          } else if (this.d.wiki) {
             try {
               wiki = await this.d.wiki.search(turn.rawText, decision.payload.searchScope, { deadlineAt: constraints.deadlineAt });
             } catch {
               wiki = { outcome: 'failed', excerpts: [] }; // 검색 결과 없음과 검색 실패를 구분
             }
+            for (const e of wiki.excerpts) sources.push(e.source);
+            if (wiki.outcome === 'found') facts.wikiExcerpts = capExcerpts(wiki.excerpts.map((e) => ({ text: e.text, ref: e.source.ref })));
           } else wiki = { outcome: 'failed', excerpts: [] };
+          facts.wikiSearched = wiki.outcome;
           meta.stateRevision += 1;
           break;
         }
@@ -484,6 +499,11 @@ export class HarnessService {
         case 'blocked':
           return this.result(meta, 'completed', actionResults, { ...exportFacts(facts), blocked: { reasons: decision.payload.unmetConditions, intent: meta.intent, ...(decision.reasonRefs.length ? { guideRefs: decision.reasonRefs } : {}) } }, { sources });
         case 'finish':
+          if (decision.payload.reason === 'answer_partial') {
+            // Guide가 Wiki 발췌로는 배경을 답할 수 없다고 봤다 → 발췌는 출력에 넘기지 않고, 못 찾았다고만 알린다
+            delete facts.wikiExcerpts;
+            return this.result(meta, 'completed', actionResults, { ...exportFacts(facts), backgroundNotFound: true }, { sources });
+          }
           return this.result(meta, 'completed', actionResults, exportFacts(facts), { sources });
       }
     }
@@ -1047,8 +1067,28 @@ function errorInfo(stage: string, code: ProvisionalErrorCode, message: string, n
   return { stage, provisionalCode: code, message, nextAction: next, ...(operationId ? { operationId } : {}) };
 }
 
+/** L-10 상한: 발췌 3개·합계 1,500자 */
+function capExcerpts(xs: { text: string; ref: string }[]): { text: string; ref: string }[] {
+  let budget = 1_500;
+  const out: { text: string; ref: string }[] = [];
+  for (const x of xs.slice(0, 3)) {
+    if (budget <= 0) break;
+    const text = x.text.slice(0, budget);
+    budget -= text.length;
+    out.push({ text, ref: x.ref });
+  }
+  return out;
+}
+
 function exportFacts(f: GuideFacts): Record<string, unknown> {
-  return { ...(f.review ? { review: f.review } : {}), ...(f.reviewError ? { reviewError: f.reviewError } : {}), ...(f.lastReviewedSha ? { lastReviewedSha: f.lastReviewedSha } : {}) };
+  return {
+    ...(f.review ? { review: f.review } : {}),
+    ...(f.reviewError ? { reviewError: f.reviewError } : {}),
+    ...(f.lastReviewedSha ? { lastReviewedSha: f.lastReviewedSha } : {}),
+    ...(f.wikiSearched ? { wikiSearch: f.wikiSearched } : {}),
+    ...(f.wikiExcerpts?.length ? { wiki: { excerpts: f.wikiExcerpts } } : {}),
+    ...(f.guideSteps?.length ? { guideSteps: f.guideSteps } : {}),
+  };
 }
 
 function questionMeaning(s: ConfirmationScope): string {

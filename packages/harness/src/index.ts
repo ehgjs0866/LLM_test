@@ -14,3 +14,4 @@ export * from './guide/guidePrompt.js';
 export * from './facts.js';
 export * from './ports.js';
 export * from './HarnessService.js';
+export * from './wiki/FileWikiReader.js';

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Id, UtcTimestamp } from './common.js';
 import { HarnessCancel, HarnessRequest, HarnessResumeRequest, HarnessResult, PipelineEvent } from './harness.js';
 import { OutputEvent, OutputRequest } from './output.js';
+import { PipelineActionRequest, PipelineEurekaActionRequest, PipelineHarnessRequest, PipelineOutputRequest, PipelineReminderRequest, PipelineRemindersRequest } from './pipelineBridge.js';
 import { OperationUpdated, Tombstone } from './projection.js';
 
 /**
@@ -29,6 +30,15 @@ export const PAYLOAD_BY_KIND = {
   'output.from_result': HarnessResult,
   'pipeline.event': PipelineEvent,
   'output.request': OutputRequest,
+  /** 파이프라인 문서 형식 (pipelineBridge.ts): HarnessAdapter.run / reconcile, OutputModel.generate */
+  'harness.run': PipelineHarnessRequest,
+  'harness.reconcile': PipelineActionRequest,
+  'output.generate': PipelineOutputRequest,
+  /** 파이프라인 문서 EurekaAdapter: execute / reconcile / reminders / reminder(itemId) */
+  'eureka.execute': PipelineEurekaActionRequest,
+  'eureka.reconcile': PipelineActionRequest,
+  'eureka.reminders': PipelineRemindersRequest,
+  'eureka.reminder': PipelineReminderRequest,
   'output.event': OutputEvent,
   'operation.updated': OperationUpdated,
   'projection.tombstone': Tombstone,
@@ -38,7 +48,7 @@ export type EnvelopeKind = keyof typeof PAYLOAD_BY_KIND;
 export const EnvelopeKind = z.enum(Object.keys(PAYLOAD_BY_KIND) as [EnvelopeKind, ...EnvelopeKind[]]);
 
 /** 실행 요청 종류: deadlineAt 필수 */
-export const EXECUTION_KINDS: ReadonlySet<EnvelopeKind> = new Set(['harness.request', 'harness.resume']);
+export const EXECUTION_KINDS: ReadonlySet<EnvelopeKind> = new Set(['harness.request', 'harness.resume', 'harness.run', 'eureka.execute']);
 
 const EnvelopeHeader = z.object({
   schemaVersion: SchemaVersion,
@@ -89,6 +99,17 @@ export function payloadRequestId(kind: EnvelopeKind, payload: unknown): string |
       return typeof p['requestId'] === 'string' ? p['requestId'] : undefined;
     case 'harness.resume':
       return typeof p['originalRequestId'] === 'string' ? p['originalRequestId'] : undefined;
+    case 'harness.run': {
+      const a = p['action'] as { requestId?: unknown } | undefined;
+      return typeof a?.requestId === 'string' ? a.requestId : undefined;
+    }
+    case 'harness.reconcile':
+    case 'output.generate':
+    case 'eureka.execute':
+    case 'eureka.reconcile':
+    case 'eureka.reminders':
+    case 'eureka.reminder':
+      return typeof p['requestId'] === 'string' ? p['requestId'] : undefined;
     case 'output.request': {
       const refs = p['requestRefs'] as { requestId?: unknown } | undefined;
       return typeof refs?.requestId === 'string' ? refs.requestId : undefined;
@@ -109,6 +130,14 @@ export function clampPayloadDeadline(env: Envelope): Envelope {
   if (env.kind === 'harness.request') {
     const p = env.payload as Envelope<'harness.request'>['payload'];
     return { ...env, payload: { ...p, constraints: clamp(p.constraints) } } as Envelope;
+  }
+  if (env.kind === 'harness.run') {
+    const p = env.payload as Envelope<'harness.run'>['payload'];
+    return { ...env, payload: { ...p, action: clamp(p.action) } } as Envelope;
+  }
+  if (env.kind === 'eureka.execute') {
+    const p = env.payload as Envelope<'eureka.execute'>['payload'];
+    return { ...env, payload: clamp(p) } as Envelope;
   }
   if (env.kind === 'harness.resume') {
     const p = env.payload as Envelope<'harness.resume'>['payload'];

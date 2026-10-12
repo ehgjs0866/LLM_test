@@ -382,6 +382,15 @@ export class InMemoryOperationStore implements OperationStore {
     return c ? clone(c) : undefined;
   }
 
+  async listWaitingPendingsByConversation(conversationId: string) {
+    return [...this.pendings.values()].filter((p) => p.conversationId === conversationId && p.state === 'waiting').map(clone);
+  }
+
+  async getConfirmationForPending(pendingId: string) {
+    const c = this.confirmationForPending(pendingId);
+    return c ? clone(c) : undefined;
+  }
+
   async listWaitingPendings(requestId: string) {
     return [...this.pendings.values()].filter((p) => p.requestId === requestId && p.state === 'waiting').map(clone);
   }

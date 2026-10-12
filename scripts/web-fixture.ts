@@ -5,14 +5,18 @@
  *
  *   pnpm web:fixture        # ws://127.0.0.1:8788, 보기 전용 토큰 fixture-viewer-token-123
  *   pnpm web:dev            # 다른 터미널, http://127.0.0.1:5173 에서 위 주소·토큰 입력
+ *   pnpm demo:adapter --fixture reminders   # 파이프라인 문서 형식(adapter)도 이 fixture로 시험 (실행용 토큰 fixture-pipeline-token-123)
  */
 import { OutputService } from '@deskpet/output';
-import { DirectHarnessInbound, HarnessWsServer } from '@deskpet/server';
+import { DirectHarnessInbound, EurekaBridge, HarnessWsServer, PipelineBridge } from '@deskpet/server';
 import { answer, askApproval, review } from '../tests/support/flows.js';
 import { createWorld } from '../tests/support/world.js';
 
 const VIEWER = 'fixture-viewer-token-123';
+const PIPELINE = 'fixture-pipeline-token-123';
 const w = createWorld();
+// 리마인더 확인용: 설명·마감이 있는 업무 (fixture)
+w.eurekaServer.addItem({ id: '2001', name: '보고서 제출', description: '실험 결과를 비교하고 분석 보고서를 제출한다.', dueAt: w.clock.nowMs() + 26 * 3600_000, stages: [{ id: '20011', name: '작성', status: 'doing', order: 1 }] });
 const step = () => w.clock.advance(20_000);
 
 await review(w, 'req-review-1'); // 완료
@@ -29,14 +33,20 @@ const q2 = await askApproval(w, 'req-approve-2'); // 확인 대기
 await w.deliverQuestion(q2);
 
 const server = new HarnessWsServer({
-  inbound: new DirectHarnessInbound({ harness: w.harness, output: new OutputService() }),
+  inbound: new DirectHarnessInbound({
+    harness: w.harness,
+    output: new OutputService(),
+    bridge: new PipelineBridge({ harness: w.harness, store: w.store, output: new OutputService() }),
+    // fixture의 Eureka는 가짜 서버라 쓰기도 그 안에서만 일어난다
+    eurekaBridge: new EurekaBridge({ eureka: w.eurekaGw, store: w.store, clock: w.clock, defaultProcessId: 'general-work-v1@10204' }),
+  }),
   store: w.store,
-  token: 'fixture-pipeline-token-not-used',
+  token: PIPELINE,
   viewerToken: VIEWER,
   port: Number(process.env['WEB_FIXTURE_PORT']) || 8788,
   allowedOrigins: ['http://127.0.0.1:5173', 'http://localhost:5173'],
   log: (l) => console.log(`[fixture] ${l}`),
 });
 const { port } = await server.start();
-console.log(`fixture 서버: ws://127.0.0.1:${port}  보기 전용 토큰: ${VIEWER}  (fixture 전용 값, 실제 토큰 아님)`);
+console.log(`fixture 서버: ws://127.0.0.1:${port}  보기 전용 토큰: ${VIEWER}  실행용 토큰: ${PIPELINE}  (fixture 전용 값, 실제 토큰 아님)`);
 process.on('SIGINT', () => void server.stop(1_000).then(() => process.exit(0)));

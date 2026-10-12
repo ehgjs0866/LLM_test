@@ -24,6 +24,13 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     return { text: `${desc}. 마감은 ${due}이에요.`, displayText: `${desc} · 마감 ${due}`, emotion: 'neutral' };
   }
 
+  // 파이프라인 문서 경계(output.generate): 기준 문장을 그대로 고정 문구로 쓴다
+  if (typeof f['baseText'] === 'string' && f['baseText']) {
+    const st = req.actionResults[0]?.status;
+    const e: Emotion = req.purpose === 'question' ? 'thinking' : st === 'unknown' ? 'concerned' : st === 'failed' ? 'apologetic' : 'neutral';
+    return { text: f['baseText'], displayText: typeof f['baseDisplayText'] === 'string' ? f['baseDisplayText'] : f['baseText'], emotion: e };
+  }
+
   const parts: string[] = [];
   const display: string[] = [];
   let emotion: Emotion = 'neutral';
@@ -138,8 +145,29 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     if (emotion === 'neutral') emotion = 'thinking';
   }
 
+  if (f['backgroundNotFound'] && req.purpose !== 'question') {
+    parts.push('팀 문서에서는 이 PR 프로젝트의 배경을 찾지 못해서, PR 내용만 알려 드렸어요.');
+    display.push('배경 문서 없음');
+  }
+
+  // 팀 문서 발췌는 고정 문구로 요약할 수 없으므로, 찾은 문서만 알린다 (내용은 출력 모델이 있을 때만)
+  const wiki = (f['wiki'] as { excerpts?: { ref: string }[] } | undefined)?.excerpts ?? [];
+  if (wiki.length && req.purpose !== 'question') {
+    const docs = [...new Set(wiki.map((e) => docTitle(e.ref)))];
+    parts.push(`관련 팀 문서 ${docs.length}개를 찾았어요: ${docs.join(', ')}.`);
+    display.push(`참고 문서 ${docs.length}`);
+  }
+
   if (parts.length === 0) parts.push('요청을 처리했어요.');
   return { text: parts.join(' '), displayText: display.join(' / ') || parts[0]!, emotion };
+}
+
+/** wiki/deskpet-development-log.md#… → deskpet-development-log, projects/deskpet/README.md → deskpet */
+function docTitle(ref: string): string {
+  const path = ref.split('#')[0]!;
+  const parts = path.replace(/\.md$/, '').split('/');
+  const last = parts[parts.length - 1]!;
+  return last === 'README' ? (parts[parts.length - 2] ?? last).replace(/^@/, '') : last;
 }
 
 function reviewSentence(r: ReviewFactsLike): string {
@@ -184,6 +212,7 @@ function blockedSentence(reasons: string[], pr?: number, review?: ReviewFactsLik
   if (reasons.includes('required_checks_unverified')) return `${requiredUnknownSentence(review?.checks?.requiredReasonCode)} 그래서 승인하지 않았어요.`;
   if (reasons.includes('required_checks_partially_verified')) return '필수 검사 설정을 일부만 확인할 수 있어서 승인하지 않았어요.';
   if (reasons.some((r) => r.startsWith('permission'))) return '승인 권한을 확인할 수 없어서 승인하지 않았어요.';
+  if (reasons.includes('llm_unavailable')) return '판단을 도와주는 모델에게서 지금 쓸 수 있는 답을 받지 못해 처리하지 못했어요. 외부 작업은 하지 않았어요. 잠시 후 다시 말씀해 주세요.';
   if (reasons.some((r) => r.startsWith('unsupported_intent'))) return '그 요청은 아직 처리할 수 없어요.';
   return `조건이 맞지 않아 실행하지 않았어요 (${reasons.join(', ')}).`;
 }

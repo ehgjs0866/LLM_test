@@ -33,6 +33,18 @@ export interface EurekaGatewayOptions {
    * false면 쓰기 메서드는 DurableAck도 요청하지 않고 not_sent(writes_disabled)를 돌려준다.
    */
   allowWrites?: boolean;
+  /**
+   * 사람(운영자) 최종 확인. 있으면 DurableAck 전에 묻고, yes 뒤 대상 상태를 다시 확인한 다음에만 보낸다 (GitHub와 같은 규칙, 감사 F-03).
+   * 거절은 CANCELLED, 시간 초과는 DEADLINE_EXCEEDED — 둘 다 not_sent.
+   */
+  operatorConfirm?: EurekaOperatorConfirm;
+}
+
+export interface EurekaOperatorConfirm {
+  confirm(
+    write: { action: string; target: string; method: string; path: string; body?: unknown },
+    c: { deadlineAt: string; signal?: AbortSignal },
+  ): Promise<'approved' | 'declined' | 'timeout'>;
 }
 
 const WRITE_STAGE = 'eureka.write';
@@ -121,17 +133,23 @@ export class EurekaGateway implements EurekaGatewayPort {
    */
   async completeStage(cmd: CompleteStageCommand, handle: DispatchHandle, c: CallConstraints): Promise<GatewayResult> {
     const ids = { operationId: handle.operationId, attemptId: handle.attemptId };
-    const pre = await this.getTaskState({ itemId: cmd.itemId, stageId: cmd.stageId }, c);
-    if (!pre.ok) return notSent(pre.result.error ?? err(WRITE_STAGE, 'EUREKA_SERVER_ERROR', 'pre-check failed', 'none', ids), 'precheck_read_failed');
-    const st = pre.data!;
-    if (st.itemStatus === 'hold') {
-      return notSent(err(WRITE_STAGE, 'EUREKA_CONFLICT', 'item is on hold; stage change would be rejected (409)', 'user_input', ids), 'precheck_hold', st);
-    }
-    if (!st.stage) return notSent(err(WRITE_STAGE, 'EUREKA_NOT_FOUND', 'stage not found in item', 'none', ids), 'precheck_stage_missing', st);
-    if (st.stage.status === 'done' || st.stage.status === 'skip') {
-      // 이미 존재하던 완료 상태는 이번 operation 성공이 아니다
-      return notSent(err(WRITE_STAGE, 'POLICY_BLOCKED', 'stage already done before this operation', 'none', ids), 'precheck_already_done', st);
-    }
+    const precheck = async (): Promise<{ stop: GatewayResult } | { st: TaskState }> => {
+      const pre = await this.getTaskState({ itemId: cmd.itemId, stageId: cmd.stageId }, c);
+      if (!pre.ok) return { stop: notSent(pre.result.error ?? err(WRITE_STAGE, 'EUREKA_SERVER_ERROR', 'pre-check failed', 'none', ids), 'precheck_read_failed') };
+      const st = pre.data!;
+      if (st.itemStatus === 'hold') {
+        return { stop: notSent(err(WRITE_STAGE, 'EUREKA_CONFLICT', 'item is on hold; stage change would be rejected (409)', 'user_input', ids), 'precheck_hold', st) };
+      }
+      if (!st.stage) return { stop: notSent(err(WRITE_STAGE, 'EUREKA_NOT_FOUND', 'stage not found in item', 'none', ids), 'precheck_stage_missing', st) };
+      if (st.stage.status === 'done' || st.stage.status === 'skip') {
+        // 이미 존재하던 완료 상태는 이번 operation 성공이 아니다
+        return { stop: notSent(err(WRITE_STAGE, 'POLICY_BLOCKED', 'stage already done before this operation', 'none', ids), 'precheck_already_done', st) };
+      }
+      return { st };
+    };
+    const first = await precheck();
+    if ('stop' in first) return first.stop;
+    const st = first.st;
     return this.sendWrite(
       { method: 'POST', path: `/_api_/stages/${enc(cmd.stageId)}/status`, body: { status: 'done' } },
       handle,
@@ -152,6 +170,12 @@ export class EurekaGateway implements EurekaGatewayPort {
             },
           ],
         };
+      },
+      { action: 'complete_stage', target: `item ${cmd.itemId} / stage ${cmd.stageId}${st.stage!.name ? ` (${st.stage!.name})` : ''}` },
+      // 운영자가 yes 하는 동안 바뀌었을 수 있으므로 다시 확인한다
+      async () => {
+        const again = await precheck();
+        return 'stop' in again ? again.stop : undefined;
       },
     );
   }
@@ -188,7 +212,7 @@ export class EurekaGateway implements EurekaGatewayPort {
       return item?.id
         ? { response: { itemId: String(item.id), stageIds: item.stageIds }, externalRefs: [{ system: 'eureka' as const, kind: 'item', id: String(item.id) }] }
         : { response: { raw: b } };
-    });
+    }, { action: 'register_item', target: `새 업무 '${cmd.name}'` });
   }
 
   /** 미정: 보낸 필드만 바뀐다 (PDF §4 연기) */
@@ -198,7 +222,7 @@ export class EurekaGateway implements EurekaGatewayPort {
       return item?.id && item.dueAt === cmd.dueAtMs
         ? { response: { itemId: String(item.id), dueAt: item.dueAt }, externalRefs: [{ system: 'eureka' as const, kind: 'item_due_change', id: `${String(item.id)}@${cmd.dueAtMs}` }] }
         : { response: { raw: b } };
-    });
+    }, { action: 'postpone_item', target: `item ${cmd.itemId}` });
   }
 
   /** 미정: 업무 전체 완료. Harness 경로에서 사용하지 않는다 */
@@ -211,6 +235,7 @@ export class EurekaGateway implements EurekaGatewayPort {
         const item = b as { id?: unknown };
         return item?.id ? { response: { item: b }, externalRefs: [{ system: 'eureka' as const, kind: 'item_complete', id: String(item.id) }] } : { response: { raw: b } };
       },
+      { action: 'complete_item', target: `item ${cmd.itemId}` },
     );
   }
 
@@ -258,6 +283,9 @@ export class EurekaGateway implements EurekaGatewayPort {
     handle: DispatchHandle,
     c: CallConstraints,
     interpret: (body: unknown) => { response: Record<string, unknown>; externalRefs?: GatewayResult['externalRefs'] },
+    describe: { action: string; target: string },
+    /** 운영자 yes 뒤 대상 상태 재확인. 실패(전송 중단)면 GatewayResult를 돌려준다 */
+    recheck?: () => Promise<GatewayResult | undefined>,
   ): Promise<GatewayResult> {
     const ids = { operationId: handle.operationId, attemptId: handle.attemptId };
     if (!this.o.allowWrites) {
@@ -267,6 +295,18 @@ export class EurekaGateway implements EurekaGatewayPort {
     if (timeoutMs <= 0 || c.signal?.aborted) {
       return notSent(err(WRITE_STAGE, 'DEADLINE_EXCEEDED', 'deadline exceeded before dispatch', 'none', ids), 'deadline_before_dispatch');
     }
+    let timeoutMs2 = timeoutMs;
+    if (this.o.operatorConfirm) {
+      const verdict = await this.o.operatorConfirm.confirm({ ...describe, method: req.method, path: req.path, ...(req.body !== undefined ? { body: req.body } : {}) }, { deadlineAt: c.deadlineAt, ...(c.signal ? { signal: c.signal } : {}) });
+      if (verdict === 'declined') return notSent(err(WRITE_STAGE, 'CANCELLED', 'operator declined before sending', 'none', ids), 'operator_declined');
+      if (verdict === 'timeout') return notSent(err(WRITE_STAGE, 'DEADLINE_EXCEEDED', 'operator confirmation timed out', 'none', ids), 'operator_timeout');
+      if (recheck) {
+        const stop = await recheck();
+        if (stop) return stop;
+      }
+      timeoutMs2 = boundedTimeout(this.totalTimeoutMs, c.deadlineAt, this.o.now());
+      if (timeoutMs2 <= 0 || c.signal?.aborted) return notSent(err(WRITE_STAGE, 'DEADLINE_EXCEEDED', 'deadline exceeded before dispatch', 'none', ids), 'deadline_before_dispatch');
+    }
     const ack = await handle.beforeDispatch();
     if (!ack.ok) {
       const code: ProvisionalErrorCode = ack.reason === 'storage_error' ? 'STORAGE_RESERVATION_FAILED' : 'POLICY_BLOCKED';
@@ -274,7 +314,7 @@ export class EurekaGateway implements EurekaGatewayPort {
     }
     let response: HttpResponse;
     try {
-      response = await this.o.http.request({ ...req, timeoutMs, ...(c.signal ? { signal: c.signal } : {}) });
+      response = await this.o.http.request({ ...req, timeoutMs: timeoutMs2, ...(c.signal ? { signal: c.signal } : {}) });
     } catch (e) {
       if (!(e instanceof HttpTransportError)) throw e;
       if (e.failure.kind === 'not_sent') {

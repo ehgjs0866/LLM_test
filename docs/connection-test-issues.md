@@ -322,6 +322,21 @@ gh api repos/ehgjs0866/personal_MCP_test/commits/293300b/check-runs --jq ".check
 
 ---
 
+## 14. Gemini 호출이 시간 초과 (2026-10-12)
+
+- 증상: `pnpm demo --ask`가 `llm_unavailable:timeout`으로 차단, `pnpm smoke llm`도 Guide·출력 모두 `timeout`. 생각 수준 기본값과 `low`에서 Guide 한 번에 13.6초(입력 567·출력 161 토큰).
+- 원인: Gemini 3 계열의 생각(thinking) 시간. 짧은 호출 자체는 1.2초로 정상이었다.
+- 해결: `GEMINI_THINKING_LEVEL=minimal` → Guide 1.1초, 출력 1.3초로 모두 통과. 코드 기본값도 `minimal`로 바꿨다 (`.env`에서 다른 값으로 바꿀 수 있음).
+- 같이 바꾼 것: 모델 장애는 "그 요청은 처리할 수 없어요"가 아니라 "판단 모델에게서 답을 받지 못했어요"로 알리고, PR 자료를 이미 모았으면 그 자료로 답한다. `pnpm smoke llm`에 짧은 호출 측정과 실패 시 경과 시간을 추가했다. `LLM_GUIDE_TIMEOUT_MS`로 Guide 상한을 바꿀 수 있다.
+
+## 15. Eureka 확인 질문에서 출력 모델 문장이 거부되고 고정 문구 사용 (2026-10-12, 관찰)
+
+- 상황: G-01 실제 시험(PR #15 승인 → item 1000020 / stage 1000195 완료). 승인 뒤 "Eureka의 '목표와 범위 정리' 단계를 완료로 반영할까요?" 출력에서 `모델 문장 거부: display:missing_required:…`.
+- 원인: 모델이 화면 문장(displayText)을 "GitHub 승인 성공 … / 답변 대기"처럼 줄이면서 필수 문구(확인 질문)를 뺐다. 출력 규칙 1번은 필수 문구를 음성·화면 둘 다에 넣도록 요구한다.
+- 판단: 검증이 의도대로 작동했다. 고정 문구로 대신 말했고 질문 내용은 정확했다. 실행에는 영향 없음 (확인 질문은 고정 문자열이 기준).
+- 남은 일(미정): 화면 문장에서도 확인 질문 전체를 요구할지, 화면은 짧은 요약만 허용할지 팀과 정한다. 정하기 전까지 코드는 바꾸지 않는다.
+- 같은 시험 결과: `complete_stage` succeeded, 외부 증거 `eureka/stage_status_change id=1000195 {"status":"done"}`, Eureka 화면에서 완료 확인. 콘솔 `yes`는 GitHub·Eureka 각 1회.
+
 ## 참고: 의도한 동작 (문제 아님)
 
 | 출력 | 이유 |

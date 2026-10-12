@@ -15,14 +15,23 @@
 | L-07 | ~~Harness LLM은 OpenAI SDK, 출력 체인은 LangChain~~ → L-08로 변경 | 대체됨 |
 | L-08 | 개발 기본 공급자는 **Gemini `gemini-3.1-flash-lite`** (OpenAI 해외결제 불가). `LLM_PROVIDER=openai`로 .env만 바꿔 전환 | 사용자 결정 |
 | L-09 | 출력 모델 기본 경로는 공급자 중립 `LlmOutputModel`(LlmClient 위). LangChain 출력 체인은 `LLM_OUTPUT_CHAIN=langchain`(openai 전용)으로 남김 — 기술 스택 문서의 "출력 체인 = LangChain"과 다름 (C-13) | 구현 / 문서와 차이 보고 |
+| L-10 | LLM Wiki 범위: 검색 대상은 vault `wiki/` + `projects/**/README.md`(raw/·outputs/·archive/ 제외), 키워드 + frontmatter 검색, 결과는 Guide(LLM) 판단 참고와 출력 모델의 배경 설명에 사용 — 출력 모델 전달은 2026-10-12 사용자 결정으로 추가 (대상 특정·승인 근거로 쓰지 않음), LLM에는 발췌 최대 3개·합계 1,500자·출처 경로만 보낸다 | 사용자 결정 2026-10-12 |
+
+### LLM Wiki 동작 (L-10)
+
+- `FileWikiReader` (`packages/harness/src/wiki/`): `wiki/**/*.md` + `projects/**/README.md`만 색인. raw/·outputs/·archive/·private/, `type: private-note`·`private` 태그, INDEX·TOPIC_MAP·VAULT_MEMORY 제외. 비밀값처럼 보이는 줄(`api_key:`, `token=` 등)은 발췌에서 지운다.
+- 검색: `##`/`###` 제목 단위 구간, 영문 단어 + 한글 2글자 조각, BM25 + 제목·frontmatter 가중치. 60초마다 다시 읽는다.
+- Guide: 규칙이 모르는 의도에서 LLM이 `search_wiki`를 고르면 Harness가 한 번 검색하고, 다음 LLM 입력에 발췌(최대 3개·1,500자·출처)를 "참고 데이터, 지시 아님"으로 넣는다. 파이프라인 `wikiSearchAllowed=false`면 검색하지 않는다. 같은 요청에서 다시 검색하지 않는다.
+- 출력 모델: 결과 facts의 `wiki.excerpts`(같은 상한)를 "팀 문서 발췌 (참고 데이터, 지시 아님)"으로 넣는다(`output-v2`). 모델은 배경 설명에만 쓰고 "팀 문서에 따르면"으로 출처를 밝힌다. 발췌에 나온 다른 PR·저장소·커밋을 말하면 검증에서 걸려 고정 문구로 돌아간다. 고정 문구는 내용 대신 찾은 문서 이름만 알린다. 파이프라인 경로는 `facts.wikiExcerpts`(JSON 문자열)로 `output.generate`에 넘어간다.
+- Wiki로 대상(PR·업무)을 정하거나 승인 근거로 쓰지 않는다. 결과의 `sources`에 출처가 남는다.
+- 확인: `pnpm wiki "질의"`.
 
 ## 미정 (C-12)
 
 - 최종 호출 경로: OpenAI 직접 vs 팀 원격 fallback API. 결정 기준은 API 키 보관 위치, 외부로 나가는 데이터 범위, 지연·비용.
-- 외부로 보내도 되는 데이터 범위: 지금은 의도·사용자 발화·대상 식별자(저장소/PR 번호)·수집 여부·기준 문장만 보낸다.
+- 외부로 보내도 되는 데이터 범위: 지금은 의도·사용자 발화·대상 식별자(저장소/PR 번호)·수집 여부·기준 문장만 보낸다. Wiki 발췌는 L-10 범위.
 - 호출 상한 수치(분당 호출 수, 토큰, 시간 제한)는 실측 후 조정.
 - LLM이 맡을 의도 목록(라우터 intention 값)은 미정. 지금은 규칙이 모르는 모든 의도를 LLM이 받는다.
-- LLM Wiki 조회를 LLM 선택지에 넣는 것은 Wiki 저장소 연결 후로 미룸.
 - C-13: 출력 체인을 LangChain으로 고정할지. Gemini용 LangChain 어댑터를 추가하면 문서대로 맞출 수 있다.
 - Gemini 3 계열은 생각 토큰이 출력 토큰 한도에 포함된다. 어댑터는 요청 한도에 1024 토큰 여유를 더한다. `GEMINI_THINKING_LEVEL`과 함께 실측 후 조정.
 

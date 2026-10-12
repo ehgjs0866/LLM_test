@@ -5,20 +5,21 @@
  *   pnpm harness                          # 쓰기 비활성 (GitHub 승인·Eureka 완료 요청은 보내지 않음)
  *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 전송 직전마다 이 서버 콘솔에서 yes 입력 필요.
  *                                         # DESKPET_STORE_PATH(영속 저장소) 필수. 같은 DB는 한 프로세스만 연다 (<DB>.lock)
+ *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발 환경 flw-d1만). 전송 직전마다 콘솔 yes. 영속 저장소 필수
  *
  * .env
  *   HARNESS_WS_TOKEN (필수, 16자 이상 — 클라이언트 hello 인증), HARNESS_WS_HOST(기본 127.0.0.1), HARNESS_WS_PORT(기본 8787),
  *   HARNESS_WS_ALLOWED_ORIGINS (브라우저 Origin 허용 목록, 쉼표 구분. 비우면 브라우저 접속 거부)
  *   HARNESS_WS_VIEWER_TOKEN (선택, 16자 이상 — 웹 화면용 구독 전용 토큰. pipeline 토큰과 달라야 함)
  *   GITHUB_TOKEN, EUREKA_API_KEY, EUREKA_BASE_URL, DESKPET_REQUIRED_CHECKS, DESKPET_STORE_PATH, LLM_* (기존과 같음)
- * 비밀값은 출력하지 않는다. Eureka 쓰기는 항상 꺼져 있다.
+ * 비밀값은 출력하지 않는다. 쓰기는 옵션을 준 경우에만, 보내기 직전마다 콘솔 yes 확인 후 보낸다.
  */
 import { createInterface } from 'node:readline/promises';
 import { createEurekaRestGateway, GitHubReviewGateway, parseRequiredChecksFallback, RestGitHubTransport } from '@deskpet/gateways';
-import { DEFAULT_POLICY, HarnessService, InMemoryOperationStore, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
+import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
 import { createLlmFromEnv } from '@deskpet/llm';
 import { OutputService } from '@deskpet/output';
-import { ConsoleOperatorConfirm, DirectHarnessInbound, HarnessWsServer } from '@deskpet/server';
+import { ConsoleOperatorConfirm, DirectHarnessInbound, EurekaBridge, HarnessWsServer, PipelineBridge } from '@deskpet/server';
 
 try {
   process.loadEnvFile('.env');
@@ -27,6 +28,7 @@ try {
 }
 const env = process.env;
 const allowGithubWrites = process.argv.includes('--allow-github-writes');
+const allowEurekaWrites = process.argv.includes('--allow-eureka-writes');
 const fail = (msg: string): never => {
   console.log(`✗ ${msg}`);
   process.exit(1);
@@ -37,7 +39,9 @@ if (token.length < 16) fail('HARNESS_WS_TOKEN은 16자 이상이어야 해요');
 const githubToken = env['GITHUB_TOKEN'] || fail('GITHUB_TOKEN이 비어 있어요');
 
 // ------------------------------------------------------------------ wiring
-const config = DEFAULT_POLICY;
+// LLM Guide 호출 시간 상한은 .env LLM_GUIDE_TIMEOUT_MS로 바꿀 수 있다 (기본 8초)
+const guideTimeout = Number(env['LLM_GUIDE_TIMEOUT_MS']);
+const config = { ...DEFAULT_POLICY, ...(guideTimeout > 0 ? { llmGuideTimeoutMs: guideTimeout } : {}) };
 const storeOpts = {
   clock: systemClock,
   ids: randomIdGen,
@@ -49,6 +53,10 @@ const storeOpts = {
 const storePath = env['DESKPET_STORE_PATH']?.trim();
 // 쓰기 모드는 영속 저장소가 있어야 한다: 메모리 저장소는 재시작 뒤 '보냈을 수 있는' 승인을 기억하지 못해 중복 전송을 막지 못한다 (감사 F-04)
 if (allowGithubWrites && !storePath) fail('--allow-github-writes는 DESKPET_STORE_PATH(영속 저장소)가 있어야 켤 수 있어요');
+if (allowEurekaWrites && !storePath) fail('--allow-eureka-writes는 DESKPET_STORE_PATH(영속 저장소)가 있어야 켤 수 있어요');
+// Eureka 쓰기는 개발 환경(flw-d1)에서만 허용한다 (사용자 결정: 개발 환경부터)
+const eurekaBase = env['EUREKA_BASE_URL']?.trim() || 'https://api.eureka.codes/flw-d1';
+if (allowEurekaWrites && !/\/flw-d1\/?$/.test(eurekaBase)) fail(`--allow-eureka-writes는 개발 환경(flw-d1)에서만 켤 수 있어요 (지금: ${eurekaBase})`);
 const openStore = (): InMemoryOperationStore => {
   try {
     return storePath ? InMemoryOperationStore.openDurable(storePath, storeOpts) : new InMemoryOperationStore(storeOpts);
@@ -76,19 +84,30 @@ const consolePrompt = async (lines: string[], question: string, signal: AbortSig
     rl.close();
   }
 };
+// GitHub·Eureka 쓰기 확인은 같은 콘솔 게이트를 쓴다 (한 번에 하나씩 묻는다)
+const operatorGate = new ConsoleOperatorConfirm({ prompt: consolePrompt });
 const github = new GitHubReviewGateway({
   transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites }),
   now: () => Date.now(),
   requiredChecksFallback: parseRequiredChecksFallback(env['DESKPET_REQUIRED_CHECKS']),
-  ...(allowGithubWrites ? { operatorConfirm: new ConsoleOperatorConfirm({ prompt: consolePrompt }) } : {}),
+  ...(allowGithubWrites ? { operatorConfirm: operatorGate } : {}),
 });
-const eureka = createEurekaRestGateway(env, undefined, { allowWrites: false });
+const eureka = createEurekaRestGateway(env, undefined, { allowWrites: allowEurekaWrites, ...(allowEurekaWrites ? { operatorConfirm: operatorGate.forEureka() } : {}) });
 const llm = createLlmFromEnv(env);
-const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}) });
+// LLM Wiki (D-19): vault 루트 경로. 없으면 Wiki 검색을 하지 않는다
+const wikiDir = env['DESKPET_WIKI_DIR']?.trim();
+const wiki = wikiDir ? new FileWikiReader({ root: wikiDir }) : undefined;
+const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}), ...(wiki ? { wiki } : {}) });
 const output = new OutputService(llm.outputModel ? { model: llm.outputModel, ...(llm.outputTimeoutMs ? { modelTimeoutMs: llm.outputTimeoutMs } : {}) } : {});
 
 const server = new HarnessWsServer({
-  inbound: new DirectHarnessInbound({ harness, output }),
+  // 파이프라인 문서 형식(harness.run 등)도 같은 서버에서 받는다 (docs/pipeline-bridge.md)
+  inbound: new DirectHarnessInbound({
+    harness,
+    output,
+    bridge: new PipelineBridge({ harness, store, output }),
+    eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }),
+  }),
   store,
   token,
   ...(env['HARNESS_WS_VIEWER_TOKEN']?.trim() ? { viewerToken: env['HARNESS_WS_VIEWER_TOKEN'].trim() } : {}),
@@ -100,8 +119,9 @@ const server = new HarnessWsServer({
 
 async function main() {
   console.log('DeskPet Harness 서버');
-  console.log(allowGithubWrites ? 'GitHub 쓰기 허용: 전송 직전마다 이 콘솔에서 yes 입력이 필요합니다. Eureka 쓰기는 꺼져 있습니다.' : '쓰기 비활성: GitHub 승인·Eureka 단계 완료 요청은 보내지 않습니다.');
+  console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (보내기 직전마다 이 콘솔에서 yes)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (보내기 직전마다 이 콘솔에서 yes)` : '꺼짐'}`);
   console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model}` : `LLM 꺼짐 (${llm.reason})`);
+  console.log(wikiDir ? `Wiki: ${wikiDir} (wiki/ + projects/ README, Guide 참고용)` : 'Wiki 꺼짐 (DESKPET_WIKI_DIR 미설정)');
   if (storePath) {
     const cleaned = await store.maintain();
     const all = await store.listOperations();

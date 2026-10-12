@@ -3,6 +3,7 @@ import {
   allowedFromScope,
   emptyAllowed,
   foreignIdentifiers,
+  mentionedIdentifiers,
   type AllowedIdentifiers,
   type ConfirmationScope,
   type Emotion,
@@ -138,6 +139,14 @@ export function allowedIdentifiers(req: OutputRequest): AllowedIdentifiers {
     }
   }
   collect(req.facts, allowed, 0);
+  // 기준 문장(파이프라인 경계)에 이미 있는 식별자는 허용한다
+  const base = req.facts['baseText'];
+  if (typeof base === 'string') {
+    const m = mentionedIdentifiers(base);
+    m.repositories.forEach((x) => allowed.repositories.add(x));
+    m.prNumbers.forEach((x) => allowed.prNumbers.add(x));
+    m.shas.forEach((x) => allowed.shas.add(x));
+  }
   return allowed;
 }
 

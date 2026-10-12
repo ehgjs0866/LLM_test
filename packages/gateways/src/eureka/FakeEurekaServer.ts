@@ -103,6 +103,27 @@ export class FakeEurekaServer implements HttpClient {
       }
       return { status: 404, bodyText: `.id[${id}] not found` };
     }
+    if (req.method === 'PUT' && (m = req.path.match(/^\/_api_\/items\/([^/]+)$/))) {
+      const it = this.items.get(decodeURIComponent(m[1]!));
+      if (!it) return { status: 404, bodyText: `.id[${m[1]}] not found` };
+      const body = req.body as { dueAt?: unknown };
+      if (typeof body?.dueAt === 'number') it.dueAt = body.dueAt;
+      return ok({ id: it.id, name: it.name, dueAt: it.dueAt });
+    }
+    if (req.method === 'POST' && req.path === '/_api_/items/0/start') {
+      const body = req.body as { processId?: unknown; name?: unknown; dueAt?: unknown };
+      if (typeof body?.processId !== 'string') return { status: 500, bodyText: '.processId is required' };
+      const id = String(1000100 + this.items.size);
+      this.items.set(id, { id, name: String(body.name ?? ''), ...(typeof body.dueAt === 'number' ? { dueAt: body.dueAt } : {}), stages: [{ id: `${id}1`, name: '시작', status: 'todo', order: 1 }] });
+      return ok({ id, stageIds: [`${id}1`] });
+    }
+    if (req.method === 'POST' && (m = req.path.match(/^\/_api_\/items\/([^/]+)\/complete$/))) {
+      const it = this.items.get(decodeURIComponent(m[1]!));
+      if (!it) return { status: 404, bodyText: `.id[${m[1]}] not found` };
+      if (it.status === 'hold') return { status: 409, bodyText: 'item is on hold' };
+      for (const st of it.stages) if (st.status !== 'skip') st.status = 'done';
+      return ok({ id: it.id, status: 'done' });
+    }
     if (req.method === 'GET' && req.path === '/_api_/processes/0/list') {
       return ok({ total: 1, list: [{ id: 'general-work-v1@10204', name: '일반 업무', stageIds: [] }] });
     }

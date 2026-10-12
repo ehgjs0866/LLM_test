@@ -91,6 +91,8 @@ export const ExecutionConstraints = z.object({
   maxResultBytes: z.number().int().positive().default(256_000),
   allowedActions: z.array(z.string()).optional(),
   policyVersion: z.string().default('policy-0.1'),
+  /** 파이프라인의 wikiSearchAllowed. false면 Wiki를 검색하지 않는다. 없으면 허용 (D-19) */
+  wikiSearchAllowed: z.boolean().optional(),
 });
 export type ExecutionConstraints = z.infer<typeof ExecutionConstraints>;
 
@@ -111,6 +113,11 @@ export const HarnessResumeRequest = z.object({
   expectedPendingRevision: Revision,
   confirmationId: Id.optional(),
   newCallConstraints: ExecutionConstraints,
+  /**
+   * 파이프라인의 mutationApproved (pipeline 문서). false면 답변이 승인처럼 들려도 쓰기를 하지 않고 다시 묻는다.
+   * 없으면(기존 경로) Harness 답변 해석만 쓴다.
+   */
+  externalApproval: z.boolean().optional(),
 });
 export type HarnessResumeRequest = z.infer<typeof HarnessResumeRequest>;
 

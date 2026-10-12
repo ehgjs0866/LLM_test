@@ -2,5 +2,7 @@ packages:
   - packages/*
   - apps/*
 
-onlyBuiltDependencies:
-  - esbuild
+allowBuilds:
+  '@google/genai': true
+  esbuild: false
+  protobufjs: false

@@ -12,7 +12,8 @@
  * 키·토큰 값은 출력하지 않는다.
  */
 import { EurekaGateway, FetchHttpClient, GitHubReviewGateway, RestGitHubTransport, EUREKA_DEV_BASE_URL, parseRequiredChecksFallback } from '@deskpet/gateways';
-import { GUIDE_INSTRUCTIONS, GUIDE_JSON_SCHEMA, reviewFacts } from '@deskpet/harness';
+import { GUIDE_INSTRUCTIONS, GUIDE_JSON_SCHEMA, InMemoryOperationStore, randomIdGen, reviewFacts, systemClock } from '@deskpet/harness';
+import { EurekaBridge } from '@deskpet/server';
 import { createLlmFromEnv } from '@deskpet/llm';
 import { OUTPUT_INSTRUCTIONS } from '@deskpet/output';
 import type { ErrorInfo } from '@deskpet/contracts';
@@ -74,6 +75,12 @@ async function eureka() {
   }
   const withDescription = items.filter((i) => i.description !== undefined).length;
   skip(`description 필드가 있는 업무 ${withDescription}/${items.length}건 (README C-08 확인용)`);
+
+  // 파이프라인 문서의 EurekaAdapter.reminders() — 설명·마감이 있는 열린 업무만 (읽기 전용)
+  const bridge = new EurekaBridge({ eureka: gw, store: new InMemoryOperationStore({ clock: systemClock, ids: randomIdGen, capacityBytes: 1 << 20, recoveryBudgetBytes: 0, minRetentionMs: 0, maxRecoveryAttempts: 1 }), clock: systemClock });
+  const rem = await bridge.reminders(deadline().deadlineAt);
+  ok(`리마인더 대상 ${rem.items.length}건 (설명·마감 없어 제외 ${rem.skipped}건)`);
+  for (const r of rem.items.slice(0, 3)) console.log(`      · [${r.itemId}] ${r.description} — 마감 ${r.dueAt}`);
 
   const itemId = env['EUREKA_TEST_ITEM_ID'] || items[0]?.itemId;
   if (!itemId) return skip('상태를 조회할 업무가 없어요');
@@ -138,6 +145,14 @@ async function llmCheck() {
   if (!s.enabled) return skip(`꺼짐 — ${s.reason} (켜려면 LLM_PROVIDER=gemini + GEMINI_API_KEY, 또는 LLM_PROVIDER=openai + OPENAI_API_KEY·OPENAI_MODEL)`);
   const keyName = s.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
   console.log(`  provider ${s.provider}, model ${s.model}, 출력 경로 ${s.outputChain} (키 길이 ${env[keyName]?.length ?? 0})`);
+  // 기본 응답 시간: 스키마 없이 아주 짧은 호출 (모델·네트워크 자체가 느린지 구분)
+  const tp = Date.now();
+  try {
+    await s.guideClient!.complete({ purpose: 'guide', instructions: '한 단어로만 답한다.', input: '"확인"이라고만 답해.', maxOutputTokens: 20, deadlineAt: new Date(Date.now() + 30_000).toISOString() });
+    ok(`기본 응답 시간: ${Date.now() - tp}ms (짧은 호출)`);
+  } catch (e) {
+    bad(`짧은 호출도 실패 — ${(e as { code?: string }).code ?? ''} ${(e as Error).message} (${Date.now() - tp}ms)`, '모델·네트워크 자체가 느리거나 막혀 있어요. 잠시 뒤 다시 하거나 GEMINI_MODEL을 바꿔 보세요');
+  }
   const t0 = Date.now();
   try {
     const r = await s.guideClient!.complete({
@@ -150,7 +165,7 @@ async function llmCheck() {
     });
     ok(`Guide 단계 제안: ${JSON.stringify(r.json)} (${Date.now() - t0}ms${r.usage ? `, 토큰 ${r.usage.inputTokens}+${r.usage.outputTokens}` : ''})`);
   } catch (e) {
-    bad(`Guide 호출 실패 — ${(e as { code?: string }).code ?? ''} ${(e as Error).message}`, '키·모델 이름·요금제(무료 한도) 상태를 확인하세요');
+    bad(`Guide 호출 실패 — ${(e as { code?: string }).code ?? ''} ${(e as Error).message} (${Date.now() - t0}ms / 상한 15000ms)`, '키·모델 이름·요금제(무료 한도) 상태를 확인하세요');
   }
   const t1 = Date.now();
   try {
@@ -163,7 +178,7 @@ async function llmCheck() {
     });
     ok(`출력 문장: "${d.text}" / 화면 "${d.displayText}" / ${d.emotion} (${Date.now() - t1}ms)`);
   } catch (e) {
-    bad(`출력 모델 호출 실패 — ${(e as { code?: string }).code ?? ''} ${(e as Error).message}`);
+    bad(`출력 모델 호출 실패 — ${(e as { code?: string }).code ?? ''} ${(e as Error).message} (${Date.now() - t1}ms / 상한 15000ms)`);
   }
 }
 

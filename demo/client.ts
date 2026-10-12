@@ -121,6 +121,11 @@ async function show(title: string, r: HarnessResult): Promise<string> {
   if (fu) console.log(`  · Eureka 후속 적합성: ${fu.eligibility}${fu.conditions?.length ? ` [${fu.conditions.join(', ')}]` : ''}${fu.reason ? ` (${fu.reason})` : ''}`);
   if (r.pending) console.log(`  · 대기 질문: ${r.pending.kind} / ${r.pending.purpose}${r.pending.scope ? ` / ${(r.facts['question'] as { meaning?: string })?.meaning ?? ''}` : ''}`);
   for (const e of r.processingErrors) console.log(`  · 처리 오류: ${e.provisionalCode}: ${e.message}`);
+  const steps = r.facts['guideSteps'] as string[] | undefined;
+  if (steps?.length) console.log(`  · Guide 단계: ${steps.join(' → ')}`);
+  const wikiSearch = r.facts['wikiSearch'] as string | undefined;
+  const wikiRefs = r.sources.filter((s) => s.kind === 'wiki').map((s) => s.ref);
+  if (wikiSearch) console.log(`  · Wiki 검색: ${wikiSearch}${wikiRefs.length ? ` [${wikiRefs.join(', ')}]` : ''}`);
   const content = (await call('output.from_result', r.requestId, r, false)) as OutputContent;
   console.log(`  🗣 ${content.text}`);
   console.log(`  🖥 ${content.displayText}`);

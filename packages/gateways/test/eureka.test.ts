@@ -236,3 +236,55 @@ describe('EurekaGateway direct path — registerItem body', () => {
     expect(r.externalRefs[0]).toMatchObject({ kind: 'item', id: '1000099' });
   });
 });
+
+describe('EurekaGateway — 운영자 확인 (--allow-eureka-writes)', () => {
+  const withGate = (verdict: (server: FakeEurekaServer) => Promise<'approved' | 'declined' | 'timeout'>) => {
+    const s = setup();
+    const seen: string[] = [];
+    const gw = new EurekaGateway({
+      http: s.server,
+      now: () => NOW,
+      allowWrites: true,
+      operatorConfirm: {
+        confirm: async (w) => {
+          seen.push(`${w.action} ${w.method} ${w.path}`);
+          return verdict(s.server);
+        },
+      },
+    });
+    return { ...s, gw, seen };
+  };
+
+  it('yes면 ack 뒤 한 번 보낸다. 확인 화면에 행위·요청을 보여 준다', async () => {
+    const { gw, server, seen } = withGate(async () => 'approved');
+    const { h, calls } = handle();
+    const r = await gw.completeStage(cmd, h, c);
+    expect(r).toMatchObject({ dispatchState: 'sent', outcome: 'response' });
+    expect(seen).toEqual([`complete_stage POST /_api_/stages/${STAGE_ID}/status`]);
+    expect(calls()).toBe(1);
+    expect(server.writeCount('/')).toBe(1);
+  });
+
+  it('거절·시간 초과면 ack도 받지 않고 보내지 않는다', async () => {
+    for (const [v, code] of [['declined', 'CANCELLED'], ['timeout', 'DEADLINE_EXCEEDED']] as const) {
+      const { gw, server } = withGate(async () => v);
+      const { h, calls } = handle();
+      const r = await gw.completeStage(cmd, h, c);
+      expect(r).toMatchObject({ dispatchState: 'not_sent', error: { provisionalCode: code } });
+      expect(calls()).toBe(0);
+      expect(server.writeCount('/')).toBe(0);
+    }
+  });
+
+  it('yes 하는 사이 단계가 이미 완료되면 다시 확인해서 보내지 않는다', async () => {
+    const { gw, server } = withGate(async (srv) => {
+      srv.items.get(ITEM_ID)!.stages[1]!.status = 'done';
+      return 'approved';
+    });
+    const { h, calls } = handle();
+    const r = await gw.completeStage(cmd, h, c);
+    expect(r).toMatchObject({ dispatchState: 'not_sent', notSentProof: 'precheck_already_done' });
+    expect(calls()).toBe(0);
+    expect(server.writeCount('/')).toBe(0);
+  });
+});

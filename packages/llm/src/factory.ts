@@ -46,7 +46,8 @@ export function createLlmFromEnv(env: Record<string, string | undefined>): LlmSe
     const apiKey = env['GEMINI_API_KEY'];
     model = env['GEMINI_MODEL']?.trim() || DEFAULT_GEMINI_MODEL;
     if (!apiKey) return { provider, enabled: false, reason: 'GEMINI_API_KEY is empty' };
-    const level = env['GEMINI_THINKING_LEVEL']?.trim().toLowerCase();
+    // 기본 minimal: Guide·출력은 선택지 고르기·문장 다듬기라 깊은 생각이 필요 없고, 생각이 길면 시간 상한을 넘긴다 (connection-test-issues #14)
+    const level = env['GEMINI_THINKING_LEVEL']?.trim().toLowerCase() || 'minimal';
     if (level && !['minimal', 'low', 'medium', 'high'].includes(level)) return { provider, enabled: false, reason: `unknown GEMINI_THINKING_LEVEL=${level}` };
     base = new GeminiLlmClient({ apiKey, model, ...(level ? { thinkingLevel: level as GeminiThinkingLevel } : {}) });
   } else {

@@ -24,6 +24,12 @@ export interface GuideFacts {
   /** 같은 대화에서 사용자가 들은 리뷰의 SHA (Harness 기록에서) */
   lastReviewedSha?: string;
   reviewError?: string;
+  /** Wiki 검색을 했으면 그 결과 상태 (같은 요청에서 다시 검색하지 않는다) */
+  wikiSearched?: 'found' | 'empty' | 'failed' | 'not_queried';
+  /** 출력 모델에 넘길 Wiki 발췌 (최대 3개·1,500자, 출처). 배경 설명 참고용 (D-19 갱신) */
+  wikiExcerpts?: { text: string; ref: string }[];
+  /** Guide가 고른 단계 기록 (예: rule:..., llm:search_wiki). 진단·데모 표시용 */
+  guideSteps?: string[];
 }
 
 export class RuleBasedGuide implements Guide {
