@@ -139,7 +139,8 @@ export class PipelineBridge {
     return p.conversationId ?? (typeof s === 'string' && s ? s : (this.d.defaultConversationId ?? DEFAULT_CONVERSATION));
   }
 
-  private async toPipelineResult(r: HarnessResult, operationId: string): Promise<PipelineHarnessResult> {
+  /** HarnessResult → 파이프라인 문서 형식 (notice 변환에도 쓴다) */
+  async toPipelineResult(r: HarnessResult, operationId: string): Promise<PipelineHarnessResult> {
     const text = (await this.fixed.generate(mapHarnessResult(r))).text;
     const awaiting = r.disposition === 'awaiting_user' && !!r.pending;
     const primary = pickPrimary(r.actionResults);
@@ -166,6 +167,14 @@ export class PipelineBridge {
     if (review?.headSha) facts['headSha'] = review.headSha;
     const blocked = r.facts['blocked'] as { reasons?: string[] } | undefined;
     if (blocked?.reasons?.length) facts['blockedReasons'] = blocked.reasons.join(',');
+    // D-23: 응답 뒤에도 진행 중인 Eureka 반영 — 끝나면 서버 notice로 결과가 온다
+    const sc = r.facts['stageCompletion'] as { status?: string; operationId?: string } | undefined;
+    if (sc?.status === 'in_progress') {
+      facts['inProgress'] = 'true';
+      if (sc.operationId) facts[K.harnessOperationId] = sc.operationId;
+    }
+    const retry = r.facts['retry'] as { status?: string } | undefined;
+    if (retry?.status) facts['retryStatus'] = retry.status;
     // 팀 문서 발췌 (L-10 상한 안). 파이프라인은 output.generate에 이 facts를 그대로 넘긴다
     const wiki = (r.facts['wiki'] as { excerpts?: unknown[] } | undefined)?.excerpts;
     if (wiki?.length) facts['wikiExcerpts'] = JSON.stringify(wiki);
@@ -264,6 +273,10 @@ function statusOf(r: HarnessResult, primary: ActionResult | undefined, awaiting:
   if (r.facts['assessmentPending']) return 'unknown';
   if (r.disposition === 'cancelled' || r.facts['declined']) return 'cancelled';
   if (r.facts['blocked'] || r.disposition === 'failed') return 'failed';
+  // D-23: 진행 중은 아직 결과가 없다 (unknown + facts.inProgress). 다시 하기를 시작하지 않았으면 실패로 알린다
+  if ((r.facts['stageCompletion'] as { status?: string } | undefined)?.status === 'in_progress' && !primary) return 'unknown';
+  const retry = (r.facts['retry'] as { status?: string } | undefined)?.status;
+  if (retry && retry !== 'started' && !primary) return retry === 'already_done' ? 'succeeded' : 'failed';
   return primary?.status ?? 'succeeded';
 }
 

@@ -14,7 +14,7 @@
 | `packages/server/src/protocol.ts` | 프레임 형식 | 필요하면 수정 |
 | `packages/server/src/inbound.ts` | Envelope → Harness 호출 변환 (지금은 그대로 전달) | 입력 형식이 바뀌면 여기서 변환 |
 | `packages/server/src/HarnessWsServer.ts` | 인증·역할·상한·재전송·구독 | 그대로 |
-| `packages/server/src/operatorGate.ts` | GitHub 쓰기 직전 서버 콘솔 `yes` 확인 | 운영 정책에 따라 |
+| `packages/server/src/operatorGate.ts` | (사용 안 함, D-22) 쓰기 직전 서버 콘솔 `yes` 확인 | 다시 필요해지면 서버에서 연결 |
 | `scripts/server.ts` | 실행 진입점 (`pnpm harness`) — `pnpm server`는 pnpm 자체 명령이라 쓰지 않는다 | 그대로 |
 | `demo/` | 파이프라인 흉내 클라이언트 (`pnpm demo`) | **폴더째 삭제 가능** (서버는 import하지 않음) |
 
@@ -46,6 +46,7 @@
 | `output.generate` | 파이프라인 문서 OutputRequest | `output.text` (`{text}`) | requiredText 유지 |
 | `eureka.execute` / `eureka.reconcile` | 파이프라인 문서 ActionRequest | `action.result` | 직접 Eureka 경로. 쓰기는 mutationApproved 필요 |
 | `eureka.reminders` / `eureka.reminder` | `{requestId}` / `{requestId, itemId}` | `eureka.reminders.result` / `eureka.reminder.result` | 읽기 전용 |
+| `eureka.links` | `{requestId, itemId}` | `eureka.links.result` | 읽기 전용. 단계 기록의 PR 주소 → 연결된 PR (pipeline-bridge P-19) |
 
 응답: `{"type":"reply","causationId":"<요청 messageId>","requestId":"…","ok":true,"kind":"…","payload":…}`
 오류: `{"type":"reply","ok":false,"error":{"code":"invalid_message|forbidden|unsupported_kind|too_many_in_flight|deadline_exceeded|shutting_down|internal","message":"…","issues":[…]}}`
@@ -71,14 +72,20 @@
 
 클라이언트는 entity별 더 높은 revision만 적용한다 (RequestStateProjector). epoch가 바뀌면(서버 재시작) 다시 구독한다.
 
+### notice (D-23)
+
+요청이 끝난 뒤 확정된 결과는 구독과 별개로 pipeline 연결에 `{"type":"notice","notice":FollowUpNotice,"resultText":"고정 문구"}`로 온다. 대상: 잠깐 기다려도 끝나지 않았던 Eureka 반영(`late_completion`), 주기 복구가 확정한 결과(`recovery`). viewer 연결에는 보내지 않는다. 자세한 형식은 `pipeline-bridge.md` P-20~P-22.
+
 ## 상한·운영
 
 | 항목 | 기본값 |
 | --- | --- |
 | 바인딩 | `127.0.0.1` |
 | 메시지 크기 | 256KB (초과 시 1009로 끊음) |
-| 연결당 동시 요청 | 8 |
-| 서버 전체 동시 요청 | 32 (`maxInFlightTotal`) |
+| 연결당 동시 요청 | 8 (control 칸 제외) |
+| 서버 전체 동시 요청 | 32 (`maxInFlightTotal`, control 칸 제외) |
+| 칸별 동시 요청 (D-24) | work(harness.*·output.*) 16 / eureka(eureka.*) 16 / control(pipeline.event·harness.cancel·*.reconcile) 64 (`maxInFlightByLane`). control은 다른 칸·연결 상한과 별도라 승인 흐름이 입구에서 막히지 않음 |
+| 자원별 동시 호출 (D-24) | LLM 2건, 자리 대기 0.5초 뒤 호출하지 않고 규칙·고정 문구로 (`LLM_MAX_CONCURRENT`, `LLM_QUEUE_WAIT_MS`) / GitHub 4건, Eureka 4건 — 호출의 남은 시간 안에서 기다리고 끝내 자리가 없으면 보내지 않음(`not_sent`) (`GITHUB_MAX_CONCURRENT`, `EUREKA_MAX_CONCURRENT`) |
 | 구독 snapshot 중 대기 이벤트 | 1,000 초과 시 그 연결을 4008로 끊어 다시 구독하게 함 (`maxPendingEvents`) |
 | 송신 버퍼 | 1MB 초과 시 느린 연결을 4008로 끊음 (Harness를 막지 않음) |
 | 종료 | SIGINT/SIGTERM → 새 요청 거부, 처리 중 요청 최대 30초 기다린 뒤 닫고 저장소 close |
@@ -88,9 +95,9 @@
 
 - 기본은 쓰기 비활성.
 - `pnpm harness --allow-github-writes`일 때만 GitHub 승인 전송 가능. `DESKPET_STORE_PATH`(영속 저장소)가 없으면 시작하지 않는다.
-- 승인마다 **서버 콘솔**에서 `yes` 입력 (TTY가 아니면 거절). 클라이언트는 건너뛸 수 없다.
-- 운영자 확인은 DurableAck **전에** 묻고, 기다리는 시간은 요청 deadline과 60초 중 짧은 쪽이다. 시간 초과는 `DEADLINE_EXCEEDED`, 거절은 `cancelled` (둘 다 `not_sent`). `yes` 뒤에는 head SHA·PR 상태·권한·필수 검사를 다시 확인한 다음에만 보낸다.
-- Eureka 쓰기는 항상 꺼져 있다.
+- 승인은 요청 쪽 사용자 확인(질문 전달 보고 + 승인 답변)만으로 받는다. 서버 콘솔 `yes` 확인은 없앴다 (D-22).
+- 보내기 직전 head SHA·PR 상태·권한·필수 검사를 다시 확인한 다음에만 보낸다 (DurableAck 전).
+- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발 환경(flw-d1)에서만 (D-20).
 
 ## 문서와 다른 점 (C-14)
 

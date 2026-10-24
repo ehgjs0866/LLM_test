@@ -1,4 +1,4 @@
-import type { LlmClient } from '@deskpet/contracts';
+import { ConcurrencyLimiter, type LlmClient } from '@deskpet/contracts';
 import type { OutputModel } from '@deskpet/output';
 import { GeminiLlmClient, type GeminiThinkingLevel } from './GeminiLlmClient.js';
 import { CallWindow, GuardedLlmClient, GuardedOutputModel } from './guard.js';
@@ -27,6 +27,8 @@ export interface LlmSetup {
   outputTimeoutMs?: number;
   guideClient?: LlmClient;
   outputModel?: OutputModel;
+  /** LLM 동시 호출 상한 (D-24). LLM_MAX_CONCURRENT(기본 2), LLM_QUEUE_WAIT_MS(기본 500) */
+  limiter?: ConcurrencyLimiter;
 }
 
 export function createLlmFromEnv(env: Record<string, string | undefined>): LlmSetup {
@@ -62,9 +64,17 @@ export function createLlmFromEnv(env: Record<string, string | undefined>): LlmSe
   }
   if (chain === 'langchain' && !langchainModel) return { provider, enabled: false, reason: 'LLM_OUTPUT_CHAIN=langchain is only wired for openai' };
 
-  const guideClient = new GuardedLlmClient(base, window, maxTokens);
+  // D-24: 공급자 하나를 Guide·출력이 같이 쓰므로 동시 호출 상한도 하나. 자리가 짧게 안 나면 호출하지 않고 대체 경로로 간다
+  const concurrency = { limiter: new ConcurrencyLimiter('llm', positiveInt(env['LLM_MAX_CONCURRENT'], 2), 8), waitMs: nonNegativeInt(env['LLM_QUEUE_WAIT_MS'], 500) };
+  const guideClient = new GuardedLlmClient(base, window, maxTokens, concurrency);
   const inner = chain === 'langchain' ? langchainModel!() : new LlmOutputModel(new GuardedLlmClient(base, new CallWindow(Number.MAX_SAFE_INTEGER), maxTokens));
-  return { provider, enabled: true, model, outputChain: chain, outputTimeoutMs: positiveInt(env['LLM_OUTPUT_TIMEOUT_MS'], 8_000), guideClient, outputModel: new GuardedOutputModel(inner, window) };
+  return { provider, enabled: true, model, outputChain: chain, outputTimeoutMs: positiveInt(env['LLM_OUTPUT_TIMEOUT_MS'], 8_000), guideClient, outputModel: new GuardedOutputModel(inner, window, concurrency), limiter: concurrency.limiter };
+}
+
+function nonNegativeInt(v: string | undefined, d: number): number {
+  if (v === undefined || v.trim() === '') return d;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : d;
 }
 
 function positiveInt(v: string | undefined, d: number): number {

@@ -86,8 +86,16 @@ export class HarnessClient {
       const e = f['event'] as { kind: string; entityType?: string; entityId: string; revision: number; currentState?: Record<string, unknown> };
       if (e.kind === 'tombstone') this.entities.delete(e.entityId);
       else this.put({ entityType: e.entityType!, entityId: e.entityId, revision: e.revision, state: e.currentState ?? {} });
+    } else if (f['type'] === 'notice') {
+      // 요청이 끝난 뒤 확정된 결과 (D-23): 늦게 끝난 Eureka 반영, 주기 복구
+      const n = f['notice'] as { source?: string; action?: string; status?: string };
+      console.log(`\n  🔔 알림 (${n.source}, ${n.action} → ${n.status}): ${String(f['resultText'])}`);
+      this.notices += 1;
     } else if (f['type'] === 'error') console.log(`  ! 서버: ${String(f['code'])} ${String(f['message'])}`);
   }
+
+  /** 받은 notice 수 */
+  notices = 0;
 
   private put(o: ProjectedEntity) {
     const cur = this.entities.get(o.entityId);

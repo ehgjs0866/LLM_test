@@ -40,6 +40,9 @@
 | P-09 | 결과 하나로 줄이기 | 쓰기 작업 결과를 우선한다. 승인 성공 뒤 Eureka 확인 질문이면 `needs_clarification` + `facts.action=submit_approval` |
 | P-10 | 출력 모델 필수 의미 | `action.facts.requiredMeaning`(줄바꿈 구분)이 있으면 그 문구를, 없으면 `requiredText` 전체를 그대로 지킨다. 성공하지 않은 작업은 다듬지 않고 `requiredText`를 그대로 돌려준다 |
 | P-11 | reconcile 대상 | 같은 `requestId`의 쓰기 operation 중 결과 확인이 필요한 것. 없으면 `unknown` + `RECONCILIATION_UNAVAILABLE` |
+| P-20 | Eureka 반영 응답 시점 (D-23) | Eureka 동의 답변 뒤 최대 `followUpReplyWaitMs`(기본 3초)만 기다린다. 끝나면 결과를 그대로, 아니면 `status: unknown` + `facts.inProgress: "true"` + `facts.harnessOperationId`를 돌려주고 "진행 중이에요. 끝나면 알려 드릴게요"를 `resultText`로 준다. 끝난 결과는 서버 **notice**로 온다 |
+| P-21 | 서버 notice (D-23) | 요청 없이 오는 프레임 `{"type":"notice", notice:{noticeId, source:"late_completion"\|"recovery", requestId, operationId, action, status, result(HarnessResult), pipelineAction(문서 형식 ActionResult), observedAt}, resultText}`. pipeline 연결에만 보낸다. 파이프라인은 `resultText`를 출력 모델 `requiredText`로 써서 사용자에게 알린다. 복구로 GitHub 승인이 성공 확정되고 연결된 Eureka 단계가 반영 가능하면(단계 미완료·보류 아님·승인 뒤 새 커밋 없음, 기록에서 찾은 연결이면 기록에 PR 주소가 남아 있음) `result.pending`에 확인 질문이 실리고 `pipelineAction.status=needs_clarification`, `pipelineQuestion`에 질문 문장이 온다 (D-24). 파이프라인은 일반 질문처럼 말한 뒤 `pipeline.event question_delivered`를 보고하고 답을 `harness.run`으로 보낸다. 연결이 없을 때 온 notice는 버려지며, 같은 변경은 `operation.updated`와 snapshot으로도 확인된다 |
+| P-22 | Eureka 반영 다시 하기 (D-23) | 라우터 intention `eureka.retry`(또는 `followup.retry`)로 `harness.run`. 같은 대화에서 가장 최근의 Eureka 단계 완료가 **명시적 실패**일 때만 새 작업으로 다시 보낸다. "다시 해줘" 발화 자체를 동의로 본다(새 확인 기록, 전달 근거 `retry_request`). 결과 불명이면 다시 보내지 않는다. `facts.retryStatus`: `started` / `already_done` / `result_unknown` / `blocked` / `approval_not_confirmed` / `input_blocked` / `nothing_to_retry` |
 
 `facts` 키: `harnessRequestId`, `disposition`, `action`, `harnessOperationId`, `dispatchState`, `questionKind`(clarification|confirmation), `questionPurpose`, `pendingId`, `outputId`, `expiresAt`, `requiredMeaning`, `prNumber`, `repository`, `headSha`, `blockedReasons`.
 
@@ -51,6 +54,7 @@
 | `eureka.reconcile` | `EurekaAdapter.reconcile(ActionRequest)` | `action.result`. 조회만, 재전송 없음 |
 | `eureka.reminders` | `EurekaAdapter.reminders()` | `eureka.reminders.result` `{items, skipped, completeness, observedAt}` |
 | `eureka.reminder` | `EurekaAdapter.reminder(itemId)` | `eureka.reminder.result` `{item | null}` |
+| `eureka.links` (P-19, 문서에 없음) | — | `eureka.links.result` PrLinkLookup `{itemId, itemName, status, links[], observedAt}` |
 
 문서를 따른 부분: 입력·결과 형식, 리마인더는 설명(`description`)과 시간대가 붙은 실제 마감(`dueAt`)만 쓰고 설명이 없으면 업무명으로 대체하지 않고 뺀다 (interface-contracts §9), 쓰기 응답 유실은 `unknown`.
 
@@ -63,10 +67,13 @@
 | P-16 | 결과 문장 | `facts.resultText`에 고정 문장. 파이프라인은 출력 모델의 `requiredText`로 쓴다 |
 | P-17 | 리마인더 형식 | `{itemId, reminderKey(itemId:dueAt), name, description, dueAt(+09:00), timezone, state}`. 24시간 필터·주기·중복 방지는 파이프라인 담당(문서) |
 | P-18 | 등록 프로세스 | `.env` `EUREKA_DEFAULT_PROCESS_ID` 또는 `task` 헤드 값과 이름이 같은 프로세스. 둘 다 없으면 등록하지 않음 |
+| P-19 | 업무 → PR 연결 | Eureka에는 PR 필드가 없어, **단계 기록(note)** 본문의 `https://github.com/{owner}/{repo}/pull/{번호}`로 연결한다. `eureka.links {requestId, itemId}`가 기록이 있는 단계만 `GET /_api_/notes/0/list?sites&detail=true&stageId=`로 읽는다. 결과 `status`: `linked`(PR·단계 조합 1개) / `ambiguous`(2개 이상, 추측 안 함) / `none` / `partial`(일부 기록 조회 실패) / `failed` / `not_found`. 기록 원문은 결과에 넣지 않는다. 파이프라인은 `links[0]`으로 `resolvedTarget`(github_pr)과 `taskRefs`(`itemId`, 기록이 붙은 `stageId`)를 채워 `harness.run`을 보낸다 (서버 `harnessContextFromLink`). 허용 저장소 목록·작성자 제한은 아직 없음 (사용자 결정 2026-10-24, 나중에 추가) |
 
 Eureka 쓰기는 서버에서 계속 꺼져 있다 (`allowWrites=false`). 승인돼도 "쓰기가 꺼져 있어서 … 보내지 않았어요"로 끝난다. 실제 개발 환경 Eureka에는 `description` 필드가 없어서(C-08) 지금은 리마인더 대상이 0건일 수 있다 — `pnpm smoke eureka`로 확인.
 
-시험: `tests/e2e/eurekaBridge.test.ts`.
+시험: `tests/e2e/eurekaBridge.test.ts`, `tests/e2e/prLinks.test.ts`(기록 → PR → 승인 → 그 단계 완료).
+
+Eureka 쓰기는 이후 `pnpm harness --allow-eureka-writes`로 개발 환경에서만 켤 수 있다 (D-20).
 
 ## 흐름 예 (G-01)
 

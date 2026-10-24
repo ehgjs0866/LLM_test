@@ -10,6 +10,8 @@ export interface FakeStage {
   status?: 'todo' | 'doing' | 'done' | 'skip';
   order: number;
   completedAt?: number;
+  /** 단계 기록 (GET /_api_/notes/0/list?stageId=) */
+  notes?: { id: string; content: string; uid?: string; deletedAt?: number }[];
 }
 export interface FakeItem {
   id: string;
@@ -25,7 +27,9 @@ export type Fault =
   | { kind: 'refuse' }
   | { kind: 'status'; status: number; body: string }
   | { kind: 'drop_after_apply' }
-  | { kind: 'drop_before_apply' };
+  | { kind: 'drop_before_apply' }
+  /** 실제 시간으로 늦게 응답 (후속 작업 대기 시험용) */
+  | { kind: 'delay'; ms: number };
 
 export class FakeEurekaServer implements HttpClient {
   items = new Map<string, FakeItem>();
@@ -53,6 +57,7 @@ export class FakeEurekaServer implements HttpClient {
     this.calls.push({ method: req.method, path: req.path, ...(req.body !== undefined ? { body: req.body } : {}) });
     if (f?.kind === 'drop_before_apply') throw new HttpTransportError({ kind: 'no_response', detail: 'TimeoutError' });
     if (f?.kind === 'status') return { status: f.status, bodyText: f.body };
+    if (f?.kind === 'delay') await new Promise((r) => setTimeout(r, f.ms));
     if (!this.apiKeyValid) return { status: 403, bodyText: JSON.stringify({ message: 'Forbidden' }) };
     const res = this.route(req);
     if (f?.kind === 'drop_after_apply') throw new HttpTransportError({ kind: 'no_response', detail: 'TimeoutError' });
@@ -78,7 +83,7 @@ export class FakeEurekaServer implements HttpClient {
         dueAt: i.dueAt,
         priority: i.priority,
         ...(i.status ? { status: i.status } : {}),
-        'stage$$': i.stages.map((s) => ({ id: s.id, name: s.name, status: s.status, order: s.order })),
+        'stage$$': i.stages.map((s) => ({ id: s.id, name: s.name, status: s.status, order: s.order, noteIds: (s.notes ?? []).map((n) => n.id), 'note$$': (s.notes ?? []).map((n) => ({ id: n.id, stereo: 'comment' })) })),
       }));
       return ok({ total: list.length, list });
     }
@@ -123,6 +128,13 @@ export class FakeEurekaServer implements HttpClient {
       if (it.status === 'hold') return { status: 409, bodyText: 'item is on hold' };
       for (const st of it.stages) if (st.status !== 'skip') st.status = 'done';
       return ok({ id: it.id, status: 'done' });
+    }
+    if (req.method === 'GET' && req.path === '/_api_/notes/0/list') {
+      const stageId = req.query?.['stageId'];
+      const stage = [...this.items.values()].flatMap((i) => i.stages).find((s) => s.id === stageId);
+      const limit = Number(req.query?.['limit'] ?? 10);
+      const all = (stage?.notes ?? []).map((n) => ({ id: n.id, $: { sid: '1', uid: n.uid ?? '1' }, stereo: 'comment', content: n.content, stageId, deletedAt: n.deletedAt ?? 0, isResolved: false }));
+      return ok({ total: all.length, limit, page: 0, list: all.slice(0, limit) });
     }
     if (req.method === 'GET' && req.path === '/_api_/processes/0/list') {
       return ok({ total: 1, list: [{ id: 'general-work-v1@10204', name: '일반 업무', stageIds: [] }] });

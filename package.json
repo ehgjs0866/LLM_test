@@ -21,7 +21,8 @@
     "harness": "tsx scripts/server.ts",
     "web:dev": "pnpm --filter @deskpet/web dev",
     "web:build": "pnpm --filter @deskpet/web build",
-    "web:fixture": "tsx scripts/web-fixture.ts"
+    "web:fixture": "tsx scripts/web-fixture.ts",
+    "eureka:fields": "tsx scripts/eureka-fields.ts"
   },
   "devDependencies": {
     "@deskpet/contracts": "workspace:*",

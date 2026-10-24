@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { Id, UtcTimestamp } from './common.js';
 import { HarnessCancel, HarnessRequest, HarnessResumeRequest, HarnessResult, PipelineEvent } from './harness.js';
 import { OutputEvent, OutputRequest } from './output.js';
-import { PipelineActionRequest, PipelineEurekaActionRequest, PipelineHarnessRequest, PipelineOutputRequest, PipelineReminderRequest, PipelineRemindersRequest } from './pipelineBridge.js';
+import { PipelineActionRequest, PipelineEurekaActionRequest, PipelineHarnessRequest, PipelineOutputRequest, PipelineLinksRequest, PipelineReminderRequest, PipelineRemindersRequest } from './pipelineBridge.js';
 import { OperationUpdated, Tombstone } from './projection.js';
 
 /**
@@ -39,6 +39,7 @@ export const PAYLOAD_BY_KIND = {
   'eureka.reconcile': PipelineActionRequest,
   'eureka.reminders': PipelineRemindersRequest,
   'eureka.reminder': PipelineReminderRequest,
+  'eureka.links': PipelineLinksRequest,
   'output.event': OutputEvent,
   'operation.updated': OperationUpdated,
   'projection.tombstone': Tombstone,
@@ -109,6 +110,7 @@ export function payloadRequestId(kind: EnvelopeKind, payload: unknown): string |
     case 'eureka.reconcile':
     case 'eureka.reminders':
     case 'eureka.reminder':
+    case 'eureka.links':
       return typeof p['requestId'] === 'string' ? p['requestId'] : undefined;
     case 'output.request': {
       const refs = p['requestRefs'] as { requestId?: unknown } | undefined;

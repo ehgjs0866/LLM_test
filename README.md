@@ -59,7 +59,10 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm check` | vitest / tsc(패키지 + 웹) / eslint / 셋 다 |
 | `pnpm smoke [eureka\|github\|llm]` | 연결 테스트. Eureka·GitHub는 읽기만, llm은 작은 호출 2번 |
 | `pnpm harness [--allow-github-writes]` | Harness 서버. 시작 시 보존 정리·결과 불명 쓰기 읽기 확인, Ctrl+C 시 처리 중 요청을 마치고 종료 |
-| `pnpm demo:adapter [--fixture] <명령>` | 파이프라인 문서 형식(adapter) 시험 클라이언트: `reminders`, `reminder <itemId>`, `eureka list`, `eureka status "업무"`, `eureka postpone "업무" <ISO+09:00> [--approve]`, `harness [PR]`. `--fixture`는 `pnpm web:fixture` 서버(가짜 GitHub·Eureka)에 붙음 |
+| `pnpm demo:adapter [--fixture] <명령>` | 파이프라인 문서 형식(adapter) 시험 클라이언트: `reminders`, `reminder <itemId>`, `eureka list`, `eureka status "업무"`, `eureka postpone "업무" <ISO+09:00> [--approve]`, `links <itemId>`, `harness [PR] [--item <itemId>]`. `--fixture`는 `pnpm web:fixture` 서버(가짜 GitHub·Eureka)에 붙음 |
+| `pnpm demo --ask "Eureka 다시 반영해줘" --intent eureka.retry` | 실패한 Eureka 반영 다시 하기 (D-23) |
+| `pnpm demo --item <itemId>` | 데모를 Eureka 업무에서 시작: 단계 기록의 PR 주소로 대상 PR과 완료할 단계를 찾는다 (`.env` `DEMO_EUREKA_*`·PR 번호 불필요) |
+| `pnpm eureka:fields [itemId] [--objects] [--notes]` | Eureka 응답 필드 확인 (읽기 전용, flw-d1만). `--notes`는 단계 기록 본문 조회 |
 | `pnpm wiki "질의" [--dir <vault>]` | LLM Wiki 검색 확인 (읽기 전용). Guide에 넘길 발췌·출처를 그대로 보여 줌 |
 | `pnpm demo [PR] [--answer "…"] [--ask "…" --intent …]` | 데모 클라이언트 (서버가 켜져 있어야 함) |
 | `pnpm db [ops\|op <id>\|pending\|dedup\|turns\|raw …]` | 저장소 조회 (읽기 전용, 기록을 바꾸지 않음) |
@@ -84,12 +87,12 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 ## 쓰기 안전장치
 
 - 기본은 모든 쓰기 비활성. 승인 단계는 "쓰기가 꺼져 있어서 보내지 않았어요"로 끝나고 DurableAck도 요청하지 않는다.
-- `pnpm harness --allow-github-writes`일 때만 GitHub 승인을 보낼 수 있고, 승인마다 서버 콘솔에서 정확히 `yes`를 입력해야 한다 (TTY가 아니거나 다른 입력이면 `cancelled` + `not_sent`, 자동 재시도 없음).
+- `pnpm harness --allow-github-writes`일 때만 GitHub 승인을 보낼 수 있다. 승인은 **요청 쪽 사용자 확인**(확인 질문 전달 + 승인 답변)만으로 받는다. 서버 콘솔 `yes` 확인은 없앴다 (D-22).
   - 쓰기 모드는 `DESKPET_STORE_PATH`(영속 저장소)가 있어야 시작하고, 같은 DB는 한 프로세스만 연다 (`<DB>.lock`).
-  - 운영자 확인은 DurableAck 전에 묻고 deadline 안(최대 60초)에서만 기다린다. `yes` 뒤 PR 상태를 다시 확인하고 보낸다.
+  - 보내기 직전 Gateway가 PR 상태·head SHA·권한·필수 검사를 다시 확인하고, 어긋나면 보내지 않는다.
 - 확인 질문의 답은 **실제로 전달한 문장**이 저장된 범위(저장소·PR·커밋·행위)와 맞을 때만 받는다. 출력 모델은 이 범위 문구를 바꿀 수 없고, 성공하지 않은 쓰기 결과는 모델 문장 없이 고정 문장으로만 알린다.
 - 봉투 deadline이 지났거나 봉투·payload의 요청 ID가 다르면 실행하지 않는다.
-- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발 환경(flw-d1)에서만 보낼 수 있고 GitHub와 같이 전송 직전마다 서버 콘솔 `yes`가 필요하다 (D-20).
+- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발 환경(flw-d1)에서만 보낼 수 있다 (D-20). 보내기 직전 단계 상태(이미 완료·보류)를 다시 확인한다.
 - 본인이 연 PR은 GitHub 규칙상 승인할 수 없어 확인 질문 전에 막힌다.
 
 ## 실제 연결 기록
@@ -97,11 +100,11 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | 대상 | 결과 |
 | --- | --- |
 | GitHub | 테스트 저장소에서 리뷰 조회·필수 검사(rulesets/classic + DeskPet 대체 목록)·중복 실행 제거 확인. PR #11(다른 계정 작성)에 실제 승인 성공 (review 5410644915). 승인은 merge가 아니다 |
-| Eureka | 개발 환경 읽기 확인 (키 역할 guest, description 필드 없음). 쓰기는 시험 안 함 |
+| Eureka | 개발 환경 읽기 확인 (키 역할 guest, description 필드 없음). 2026-10-12 flw-d1 실제 쓰기 성공: PR #15 승인 뒤 G-01 후속으로 item 1000020의 stage 1000195를 `done`으로 반영 (`--allow-eureka-writes`, 콘솔 yes 2회). Eureka 화면에서도 완료 확인 |
 | LLM | Gemini `gemini-3.1-flash-lite`로 Guide 단계 제안·출력 문장 다듬기 확인 |
-| 서버·데모 | PC에서 `pnpm harness` + `pnpm demo 12`로 WebSocket 경계 너머 G-01 흐름 확인 |
+| 서버·데모 | PC에서 `pnpm harness` + `pnpm demo 12`로 WebSocket 경계 너머 G-01 흐름 확인. 2026-10-12 `pnpm demo 15 --ask`로 리뷰 → GitHub 승인(review 5490862511) → Eureka 단계 완료까지 G-01 전체를 실제 서비스로 확인 |
 
-문제와 해결 과정은 `docs/connection-test-issues.md` (1~13번).
+문제와 해결 과정은 `docs/connection-test-issues.md` (1~17번).
 
 ## 구현 원칙 (요약)
 
@@ -133,8 +136,12 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | D-15 | Harness 서비스 경계는 WebSocket `deskpet.harness.v1`. 본문은 기존 Envelope, 수신 변환 층은 지금 Harness 입력을 그대로 전달 (`docs/ws-protocol.md`) | 사용자 결정 2026-10-05 |
 | D-16 | 투영 snapshot 범위는 source 전체로 제한 (vault message-contracts에 사용자 요청으로 한 문장 추가) | 사용자 결정 2026-10-05 |
 | D-17 | 웹 화면은 보기 전용. 서버의 viewer 전용 토큰으로만 접속하고 변경 기능은 없다 (`docs/web-ui.md`) | 구현 |
-| D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만, 전송 직전마다 서버 콘솔 `yes` 확인 | 사용자 결정 2026-10-05 |
-| D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발 환경(flw-d1)에서만**, 전송 직전마다 서버 콘솔 `yes` 확인(ack 전, yes 뒤 단계 상태 재확인). 영속 저장소 필수 | 사용자 결정 2026-10-12 (실제 시험 허락) |
+| D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-05, 2026-10-24 갱신 |
+| D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발 환경(flw-d1)에서만**. 영속 저장소 필수. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-12 (실제 시험 허락) |
+| D-24 | **자원별 동시 호출 상한**: LLM 2건(자리 대기 0.5초, 안 나면 호출 없이 규칙·고정 문구), GitHub·Eureka 각 4건(남은 시간 안에서 대기, 안 나면 `not_sent`). 서버 입구는 칸(work/eureka/control)으로 나누고 질문 전달 보고·취소·reconcile(control)은 다른 칸 상한과 별도. **복구 뒤 후속 질문**: 주기 복구로 GitHub 승인이 성공 확정되면 연결된 Eureka 단계 상태와 기록(note의 PR 주소)을 다시 보고 반영 가능할 때만 확인 질문을 notice에 실어 보낸다. 연결 단계·대화·문맥 ID는 승인 operation에 남겨 재시작 뒤에도 쓴다. 수치는 미정 | 사용자 결정 2026-10-24 |
+| D-23 | **후속 작업 분리**: ① Eureka 반영은 동의 뒤 최대 3초만 기다리고, 늦으면 '진행 중'으로 답한 뒤 끝난 결과를 서버 notice로 알린다 ② 서버 안의 `RecoveryWorker`가 결과 불명·판정 대기 작업을 주기적으로(기본 30초, 작업별 간격 2배씩 최대 10분) 조회만 하고, 확정되면 notice. 상한에 닿으면 `blocked` ③ 명시적으로 실패한 Eureka 반영은 "다시 해줘"(`eureka.retry`) 발화 자체를 동의로 보고 새 작업으로 다시 보낸다. 결과 불명은 다시 보내지 않는다 | 사용자 결정 2026-10-24 |
+| D-22 | 서버 콘솔 이중 확인(`yes`)을 없앤다. 쓰기 승인은 요청 쪽(파이프라인이 전달한 확인 질문과 사용자 답변, `mutationApproved`)에서만 받는다. 쓰기 옵션·flw-d1 제한·전송 직전 상태 재확인·DurableAck는 그대로. `ConsoleOperatorConfirm` 코드는 남겨 두되 서버에서 쓰지 않는다 | 사용자 결정 2026-10-24 (피드백 반영) |
+| D-21 | G-01 시작부의 업무 → PR 연결은 Eureka **단계 기록(note)**의 PR 주소로 한다. 기록이 붙은 단계가 승인 후 완료할 단계다. 서로 다른 후보가 둘 이상이면 추측하지 않는다 (`eureka.links`, pipeline-bridge P-19). 허용 저장소 목록·작성자 제한은 나중에 추가 | 사용자 결정 2026-10-24 |
 | D-19 | LLM Wiki: `wiki/` + 프로젝트 README만 키워드·frontmatter로 검색. Guide 판단 참고와 **출력 모델의 배경 설명**에 쓰고(2026-10-12 갱신), LLM에는 발췌 3개·1,500자까지. 대상 특정·승인 근거로는 쓰지 않음 (`docs/llm-integration.md` L-10). `FileWikiReader` + Guide `search_wiki` 단계, `.env` `DESKPET_WIKI_DIR` | 사용자 결정 2026-10-12 / 구현 |
 
 ## 문서 충돌과 잠정 처리
@@ -151,7 +158,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | C-08 | 리마인더용 `description`(interface §9)이 Eureka PDF 응답 예시에는 없다 | optional로 정규화하고 `name`으로 대체하지 않음 (미정) |
 | C-09 | golden-scenario P-04는 idempotency key를 가정하나 Eureka PDF에 멱등성 지원이 없다 | completeStage 응답 유실은 unknown. getChangeOutcome의 인과 연결은 inference |
 | C-10 | 공식 GitHub MCP 승인 도구 응답은 성공 문구만 반환한다 | Fake transport에 MCP형/REST형 모드를 두고 MCP형은 unknown→reconcile |
-| C-11 | message-contracts·guide-sensor의 위키링크 `deskpet_LLM_guide_Liability`가 실제 파일명과 다르다 | vault 수정 없음. 보고만 함 |
+| C-11 | message-contracts·guide-sensor의 위키링크 `deskpet_LLM_guide_Liability`가 실제 파일명과 다르다 | 2026-10-12 사용자 승인으로 vault 링크 수정 (담당 문서 3개에 MVP 구현 현황도 반영) |
 | C-12 | LLM 호출 경로: OpenAI·Gemini 직접 호출 vs 손한솔 담당 원격 fallback API | 직접 어댑터로 개발. fallback은 어댑터 추가로 전환 (미정) |
 | C-13 | 기술 스택 문서는 출력 체인을 LangChain으로 정함 | 기본 출력 경로는 공급자 중립 `LlmOutputModel`, LangChain은 `LLM_OUTPUT_CHAIN=langchain`(openai) 옵션 (보고) |
 | C-14 | 기술 스택 문서의 보드 내 프로세스 통신 후보는 gRPC·ZeroMQ, 구현은 WebSocket | 변환 층을 전송과 분리. 파이프라인 담당자와 합의 필요 |
@@ -197,7 +204,8 @@ S-02(다중 후보), S-03(Copilot 리뷰 없음·오래됨), S-12(쓰다듬기)�
 - 파이프라인 문서에 없는 경계 항목 P-01~P-18 (`docs/pipeline-bridge.md`)
 - 파이프라인과의 transport (C-14), LLM 호출 경로·외부로 보내는 데이터 범위 (C-12), 출력 체인 (C-13)
 - 라우터 intention 값 목록과 그중 LLM이 맡을 의도, 확인 답변 허용 단어
-- 판정 대기 재판정(`reassess`)으로 승인 성공이 나온 뒤 Eureka 후속 질문 자동 시작
+- 자원별 동시 호출 상한·입구 칸 상한 수치 (D-24, 지금은 자리값)
+- 파이프라인 연결이 없을 때 생긴 notice 보관·재전송 (지금은 버리고 snapshot으로만 확인)
 - PR 변경 내용(diff) 수집 범위와 상한 (지금은 파일·증감 줄 수만, `docs/audit-fixes.md`)
 
 ## 문서

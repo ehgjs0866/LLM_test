@@ -28,7 +28,7 @@ export class DirectHarnessInbound implements HarnessInbound {
     this.kinds = new Set([
       ...base,
       ...(d.bridge ? ['harness.run', 'harness.reconcile', 'output.generate'] : []),
-      ...(d.eurekaBridge ? ['eureka.execute', 'eureka.reconcile', 'eureka.reminders', 'eureka.reminder'] : []),
+      ...(d.eurekaBridge ? ['eureka.execute', 'eureka.reconcile', 'eureka.reminders', 'eureka.reminder', 'eureka.links'] : []),
     ]);
   }
 
@@ -68,6 +68,11 @@ export class DirectHarnessInbound implements HarnessInbound {
         if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
         const p = env.payload as Envelope<'eureka.reminder'>['payload'];
         return { kind: 'eureka.reminder.result', payload: { item: await this.d.eurekaBridge.reminder(p.itemId, readDeadline(env)) } };
+      }
+      case 'eureka.links': {
+        if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
+        const p = env.payload as Envelope<'eureka.links'>['payload'];
+        return { kind: 'eureka.links.result', payload: await this.d.eurekaBridge.links(p.itemId, readDeadline(env)) };
       }
       default:
         throw new UnsupportedKindError(env.kind);

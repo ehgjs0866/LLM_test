@@ -12,6 +12,9 @@ import {
   type PipelineReminderItem,
   type PipelineRemindersResult,
   type TaskSummary,
+  type LinkedPr,
+  type PrLinkLookup,
+  extractPrLinks,
 } from '@deskpet/contracts';
 import type { EurekaGateway } from '@deskpet/gateways';
 import { DEFAULT_POLICY, StoreDispatchOwner, expectedOutcomeFor, type Clock, type OperationStore } from '@deskpet/harness';
@@ -31,6 +34,18 @@ import { formatKoreanDateTime } from '@deskpet/output';
  * - 쓰기는 operation 기록(owner=pipeline_eureka_module)과 DurableAck를 거친다. 같은 operationId 재요청은 기록된 결과를 돌려준다
  * - 결과 문장은 facts.resultText(고정 문구)로 준다. 파이프라인은 출력 모델의 requiredText로 쓴다
  */
+/**
+ * 연결된 PR → 파이프라인이 harness.run에 넣을 대상과 업무 연결 (G-01 4단계 "리마인더 문맥에서 저장소와 PR 번호를 채운다").
+ * resolvedTarget은 RouteDecision에, taskRefs는 harness.run payload에 넣는다 (P-07 확장).
+ */
+export function harnessContextFromLink(link: LinkedPr): { resolvedTarget: { kind: 'github_pr'; repository: { owner: string; name: string }; prNumber: number }; taskRefs: { itemId: string; stageId: string; repository: { owner: string; name: string }; prNumber: number; source: { kind: 'eureka'; ref: string } }[] } {
+  const repository = { owner: link.repository.owner, name: link.repository.name };
+  return {
+    resolvedTarget: { kind: 'github_pr', repository, prNumber: link.prNumber },
+    taskRefs: [{ itemId: link.itemId, stageId: link.stageId, repository, prNumber: link.prNumber, source: { kind: 'eureka', ref: `item:${link.itemId}/stage:${link.stageId}/note:${link.noteId}` } }],
+  };
+}
+
 export interface EurekaBridgeDeps {
   eureka: EurekaGateway;
   store: OperationStore;
@@ -136,6 +151,41 @@ export class EurekaBridge {
     if (!list.ok) return null;
     const t = list.data!.items.find((x) => x.itemId === itemId);
     return t ? this.toReminder(t) : null;
+  }
+
+  // ============================================================ PR links
+  /**
+   * 업무 단계 기록(note)에 적힌 GitHub PR 주소로 연결된 PR을 찾는다 (G-01 시작부, P-19).
+   * - 기록 본문은 PR 주소만 뽑고 버린다. 결과에 원문을 넣지 않는다
+   * - 서로 다른 (PR, 단계)가 둘 이상이면 ambiguous: 추측하지 않는다. 일부 기록을 못 읽으면 partial
+   * - 허용 저장소 목록·작성자 제한은 아직 없다 (사용자 결정 2026-10-24: 나중에 추가)
+   */
+  async links(itemId: string, deadlineAt: string): Promise<PrLinkLookup> {
+    const c = { deadlineAt };
+    const list = await this.d.eureka.listTasks({ limit: 100 }, c);
+    if (!list.ok) return { itemId, status: 'failed', links: [], observedAt: this.d.clock.nowIso() };
+    const item = list.data!.items.find((x) => x.itemId === itemId);
+    if (!item) return { itemId, status: list.data!.completeness === 'complete' ? 'not_found' : 'partial', links: [], observedAt: list.data!.observedAt };
+    const found = new Map<string, LinkedPr>();
+    let incomplete = false;
+    for (const st of item.stages) {
+      if (!st.noteIds?.length) continue;
+      const notes = await this.d.eureka.listStageNotes({ stageId: st.stageId }, c);
+      if (!notes.ok) {
+        incomplete = true;
+        continue;
+      }
+      if (notes.data!.completeness !== 'complete') incomplete = true;
+      for (const n of notes.data!.notes)
+        for (const l of extractPrLinks(n.content)) {
+          const key = `${l.owner.toLowerCase()}/${l.name.toLowerCase()}#${l.prNumber}@${st.stageId}`;
+          if (!found.has(key))
+            found.set(key, { repository: { owner: l.owner, name: l.name }, prNumber: l.prNumber, url: l.url, itemId, stageId: st.stageId, stageName: st.name, stageStatus: st.status, noteId: n.noteId });
+        }
+    }
+    const links = [...found.values()];
+    const status = links.length > 1 ? 'ambiguous' : incomplete ? 'partial' : links.length === 1 ? 'linked' : 'none';
+    return { itemId, itemName: item.name, status, links, observedAt: this.d.clock.nowIso() };
   }
 
   // ============================================================== reads

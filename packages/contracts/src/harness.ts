@@ -149,6 +149,23 @@ export const HarnessResult = z.object({
 });
 export type HarnessResult = z.infer<typeof HarnessResult>;
 
+/**
+ * 요청이 끝난 뒤 확정된 결과 알림 (D-23). 서버가 파이프라인 연결에 notice로 보낸다.
+ * - late_completion: 잠깐 기다리는 동안 끝나지 않았던 Eureka 반영이 끝남
+ * - recovery: 결과 불명(unknown)·판정 대기 작업을 주기 확인으로 확정함 (다시 보내지 않음)
+ */
+export const FollowUpNotice = z.object({
+  noticeId: Id,
+  source: z.enum(['late_completion', 'recovery']),
+  requestId: Id,
+  operationId: Id,
+  action: z.string(),
+  status: z.string(),
+  result: HarnessResult,
+  observedAt: UtcTimestamp,
+});
+export type FollowUpNotice = z.infer<typeof FollowUpNotice>;
+
 // ----------------------------------------------------------- PipelineEvent
 export const PipelineEventKind = z.enum([
   'question_delivered',

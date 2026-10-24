@@ -9,6 +9,8 @@ import type {
   ItemState,
   ProvisionalErrorCode,
   ReadOutcome,
+  StageNote,
+  StageNoteList,
   StageStatus,
   TaskList,
   TaskStage,
@@ -115,6 +117,40 @@ export class EurekaGateway implements EurekaGatewayPort {
         response: { itemStatus: data.itemStatus, stageFound: !!stage, ...(query.stageId && !stage ? { stageMissing: query.stageId } : {}) },
       }),
     };
+  }
+
+  /**
+   * 단계 기록 목록 (본문 포함). PDF에 없는 경로로, 2026-10-24 flw-d1에서 확인:
+   * GET /_api_/notes/0/list?sites&detail=true&stageId= → {total, limit, page, list:[{id, content, stageId, $:{uid}, ...}]}
+   */
+  async listStageNotes(query: { stageId: string; limit?: number }, c: CallConstraints): Promise<ReadOutcome<StageNoteList>> {
+    const res = await this.read(
+      { method: 'GET', path: '/_api_/notes/0/list', query: { sites: '', detail: 'true', stageId: query.stageId, limit: String(query.limit ?? 50) } },
+      c,
+    );
+    if (!res.ok) return { ok: false, result: res.result };
+    const body = safeJson(res.response.bodyText) as { total?: number; list?: unknown[] } | undefined;
+    if (!body || !Array.isArray(body.list)) return { ok: false, result: readFailure('EUREKA_SERVER_ERROR', 'unexpected note list body', 'none') };
+    const notes: StageNote[] = body.list.flatMap((raw) => {
+      const r = raw as Record<string, unknown>;
+      if (r['id'] === undefined || typeof r['content'] !== 'string') return [];
+      if (typeof r['deletedAt'] === 'number' && r['deletedAt'] > 0) return [];
+      const owner = r['$'] as { uid?: unknown } | undefined;
+      return [
+        {
+          noteId: String(r['id']),
+          stageId: String(r['stageId'] ?? query.stageId),
+          content: r['content'],
+          ...(owner?.uid !== undefined ? { authorUid: String(owner.uid) } : {}),
+          ...(typeof r['createdAt'] === 'number' ? { createdAt: new Date(r['createdAt']).toISOString() } : {}),
+          ...(typeof r['isResolved'] === 'boolean' ? { isResolved: r['isResolved'] } : {}),
+        },
+      ];
+    });
+    const completeness = typeof body.total === 'number' ? (body.list.length < body.total ? 'partial' : 'complete') : 'unknown';
+    const observedAt = this.iso();
+    const data: StageNoteList = { stageId: query.stageId, notes, completeness, observedAt, ...(typeof body.total === 'number' ? { total: body.total } : {}) };
+    return { ok: true, data, result: gr({ mode: 'read', dispatchState: 'sent', outcome: 'response', respondedAt: observedAt, completeness, response: { count: notes.length } }) };
   }
 
   /** 키·workspace 확인 (PDF §1: GET /_api_/session). 읽기 전용 */
@@ -395,6 +431,7 @@ export function normalizeItem(raw: unknown): TaskSummary {
       status: (STAGE_STATUSES as readonly string[]).includes(st) ? (st as StageStatus) : 'unknown',
       ...(typeof s['order'] === 'number' ? { order: s['order'] } : {}),
       ...(typeof s['completedAt'] === 'number' ? { completedAt: new Date(s['completedAt']).toISOString() } : {}),
+      ...(Array.isArray(s['noteIds']) && s['noteIds'].length ? { noteIds: (s['noteIds'] as unknown[]).map(String) } : {}),
     };
   });
   const dueAtMs = typeof r['dueAt'] === 'number' ? r['dueAt'] : undefined;

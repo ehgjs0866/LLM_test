@@ -3,23 +3,23 @@
  * Harness 서비스 서버 (WebSocket). 파이프라인·데모 클라이언트·웹 화면이 이 서버에 연결한다.
  *
  *   pnpm harness                          # 쓰기 비활성 (GitHub 승인·Eureka 완료 요청은 보내지 않음)
- *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 전송 직전마다 이 서버 콘솔에서 yes 입력 필요.
+ *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 승인은 요청 쪽(사용자 확인 질문·답변)에서만 받는다 (D-22).
  *                                         # DESKPET_STORE_PATH(영속 저장소) 필수. 같은 DB는 한 프로세스만 연다 (<DB>.lock)
- *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발 환경 flw-d1만). 전송 직전마다 콘솔 yes. 영속 저장소 필수
+ *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발 환경 flw-d1만). 영속 저장소 필수
  *
  * .env
  *   HARNESS_WS_TOKEN (필수, 16자 이상 — 클라이언트 hello 인증), HARNESS_WS_HOST(기본 127.0.0.1), HARNESS_WS_PORT(기본 8787),
  *   HARNESS_WS_ALLOWED_ORIGINS (브라우저 Origin 허용 목록, 쉼표 구분. 비우면 브라우저 접속 거부)
  *   HARNESS_WS_VIEWER_TOKEN (선택, 16자 이상 — 웹 화면용 구독 전용 토큰. pipeline 토큰과 달라야 함)
  *   GITHUB_TOKEN, EUREKA_API_KEY, EUREKA_BASE_URL, DESKPET_REQUIRED_CHECKS, DESKPET_STORE_PATH, LLM_* (기존과 같음)
- * 비밀값은 출력하지 않는다. 쓰기는 옵션을 준 경우에만, 보내기 직전마다 콘솔 yes 확인 후 보낸다.
+ * 비밀값은 출력하지 않는다. 쓰기는 옵션을 준 경우에만 보낸다. 서버 콘솔 yes 확인은 없앴다 (사용자 결정 2026-10-24, D-22).
  */
-import { createInterface } from 'node:readline/promises';
 import { createEurekaRestGateway, GitHubReviewGateway, parseRequiredChecksFallback, RestGitHubTransport } from '@deskpet/gateways';
-import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
+import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, RecoveryWorker, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
 import { createLlmFromEnv } from '@deskpet/llm';
-import { OutputService } from '@deskpet/output';
-import { ConsoleOperatorConfirm, DirectHarnessInbound, EurekaBridge, HarnessWsServer, PipelineBridge } from '@deskpet/server';
+import { OutputService, fallbackText, mapHarnessResult } from '@deskpet/output';
+import { ConcurrencyLimiter, type FollowUpNotice } from '@deskpet/contracts';
+import { DirectHarnessInbound, EurekaBridge, HarnessWsServer, PipelineBridge } from '@deskpet/server';
 
 try {
   process.loadEnvFile('.env');
@@ -67,45 +67,33 @@ const openStore = (): InMemoryOperationStore => {
 };
 const store = openStore();
 
-/** 서버 콘솔 확인 (TTY가 아니면 거절). 시간이 지나면 입력을 취소한다 */
-const consolePrompt = async (lines: string[], question: string, signal: AbortSignal) => {
-  console.log(`\n${lines.join('\n')}`);
-  if (!process.stdin.isTTY) {
-    console.log('  (터미널 입력을 받을 수 없어 거절합니다)');
-    return '';
-  }
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    return await rl.question(question, { signal });
-  } catch {
-    console.log('\n  (확인 시간이 지나 보내지 않습니다)');
-    return '';
-  } finally {
-    rl.close();
-  }
-};
-// GitHub·Eureka 쓰기 확인은 같은 콘솔 게이트를 쓴다 (한 번에 하나씩 묻는다)
-const operatorGate = new ConsoleOperatorConfirm({ prompt: consolePrompt });
+// 자원별 동시 호출 상한 (D-24). 자리가 없으면 그 호출의 남은 시간 안에서 기다리고, 그래도 없으면 보내지 않음(not_sent)
+const githubLimiter = new ConcurrencyLimiter('github', positive(env['GITHUB_MAX_CONCURRENT'], 4));
+const eurekaLimiter = new ConcurrencyLimiter('eureka', positive(env['EUREKA_MAX_CONCURRENT'], 4));
 const github = new GitHubReviewGateway({
-  transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites }),
+  transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites, limiter: githubLimiter }),
   now: () => Date.now(),
   requiredChecksFallback: parseRequiredChecksFallback(env['DESKPET_REQUIRED_CHECKS']),
-  ...(allowGithubWrites ? { operatorConfirm: operatorGate } : {}),
 });
-const eureka = createEurekaRestGateway(env, undefined, { allowWrites: allowEurekaWrites, ...(allowEurekaWrites ? { operatorConfirm: operatorGate.forEureka() } : {}) });
+const eureka = createEurekaRestGateway(env, undefined, { allowWrites: allowEurekaWrites, limiter: eurekaLimiter });
 const llm = createLlmFromEnv(env);
 // LLM Wiki (D-19): vault 루트 경로. 없으면 Wiki 검색을 하지 않는다
 const wikiDir = env['DESKPET_WIKI_DIR']?.trim();
 const wiki = wikiDir ? new FileWikiReader({ root: wikiDir }) : undefined;
-const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}), ...(wiki ? { wiki } : {}) });
+// 요청이 끝난 뒤 확정된 결과(늦게 끝난 Eureka 반영, 주기 복구)는 pipeline 연결에 notice로 알린다 (D-23)
+let notify: (n: FollowUpNotice) => void = () => undefined;
+const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}), ...(wiki ? { wiki } : {}), onFollowUp: (n) => notify(n) });
+// 결과 불명·판정 대기 작업 주기 확인. 다시 보내지 않고 조회만 한다 (D-23). RECOVERY_INTERVAL_MS(기본 30초)
+const recovery = new RecoveryWorker({ harness, store, clock: systemClock, intervalMs: Number(env['RECOVERY_INTERVAL_MS']) || 30_000, log: (l) => console.log(`[recovery] ${l}`) });
 const output = new OutputService(llm.outputModel ? { model: llm.outputModel, ...(llm.outputTimeoutMs ? { modelTimeoutMs: llm.outputTimeoutMs } : {}) } : {});
 
+const pipelineBridge = new PipelineBridge({ harness, store, output });
 const server = new HarnessWsServer({
   // 파이프라인 문서 형식(harness.run 등)도 같은 서버에서 받는다 (docs/pipeline-bridge.md)
   inbound: new DirectHarnessInbound({
     harness,
     output,
-    bridge: new PipelineBridge({ harness, store, output }),
+    bridge: pipelineBridge,
     eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }),
   }),
   store,
@@ -116,11 +104,30 @@ const server = new HarnessWsServer({
   allowedOrigins: (env['HARNESS_WS_ALLOWED_ORIGINS'] ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   log: (l) => console.log(`[server] ${l}`),
 });
+notify = (n) => {
+  const text = fallbackText(mapHarnessResult(n.result)).text;
+  // 파이프라인 문서 형식 ActionResult도 같이 보낸다 (resultText는 고정 문구 → 출력 모델의 requiredText로 쓸 수 있음)
+  void pipelineBridge
+    .toPipelineResult(n.result, n.operationId)
+    .catch(() => undefined)
+    .then((p) => {
+      const sent = server.notify({ ...n, ...(p ? { pipelineAction: p.action, pipelineQuestion: p.question } : {}) }, text);
+      console.log(`[notice] ${n.source} ${n.action} → ${n.status}${sent ? '' : ' (연결된 파이프라인 없음)'}: ${text}`);
+    });
+};
 
 async function main() {
   console.log('DeskPet Harness 서버');
-  console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (보내기 직전마다 이 콘솔에서 yes)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (보내기 직전마다 이 콘솔에서 yes)` : '꺼짐'}`);
-  console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model}` : `LLM 꺼짐 (${llm.reason})`);
+  console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (사용자 확인 답변만으로 보냄)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (사용자 확인 답변만으로 보냄)` : '꺼짐'}`);
+  console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model} (동시 ${llm.limiter?.stats().max ?? '-'}건)` : `LLM 꺼짐 (${llm.reason})`);
+  console.log(`동시 호출 상한: GitHub ${githubLimiter.stats().max} / Eureka ${eurekaLimiter.stats().max} (D-24)`);
+  // 웹 화면 연결 준비 상태 (값은 출력하지 않는다)
+  const origins = (env['HARNESS_WS_ALLOWED_ORIGINS'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  console.log(
+    env['HARNESS_WS_VIEWER_TOKEN']?.trim()
+      ? `웹 화면: 보기 전용 토큰 설정됨, 허용 Origin ${origins.length ? origins.join(', ') : '없음 → 브라우저 접속 거부 (HARNESS_WS_ALLOWED_ORIGINS 필요)'}`
+      : '웹 화면: 꺼짐 (HARNESS_WS_VIEWER_TOKEN 미설정)',
+  );
   console.log(wikiDir ? `Wiki: ${wikiDir} (wiki/ + projects/ README, Guide 참고용)` : 'Wiki 꺼짐 (DESKPET_WIKI_DIR 미설정)');
   if (storePath) {
     const cleaned = await store.maintain();
@@ -134,6 +141,7 @@ async function main() {
     }
   } else console.log('저장소: 메모리 (DESKPET_STORE_PATH 미설정 → 서버를 끄면 기록이 사라짐)');
   await server.start();
+  recovery.start();
   console.log('Ctrl+C로 종료하면 처리 중인 요청을 마친 뒤 닫습니다.');
 }
 
@@ -142,7 +150,9 @@ async function shutdown(sig: string) {
   if (closing) return;
   closing = true;
   console.log(`\n${sig} 수신 — 처리 중인 요청을 마치고 종료합니다 (최대 30초)`);
+  await recovery.stop();
   await server.stop(30_000);
+  await harness.drainBackground();
   store.close();
   process.exit(0);
 }
@@ -154,3 +164,8 @@ main().catch((e: unknown) => {
   store.close();
   process.exit(1);
 });
+
+function positive(v: string | undefined, d: number): number {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : d;
+}

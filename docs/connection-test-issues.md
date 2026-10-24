@@ -24,6 +24,10 @@
 | 11 | 데모를 반복 실행할수록 DB 기록이 계속 쌓임 | 해결 | 보존 정책(축약·기간·개수 상한) + SQLite 공간 회수 |
 | 12 | 확인 질문에 "확인", "approve", "confirm"은 승인으로 인식되지 않음 | 의도한 동작 (보류) | 승인 답변은 보수적으로 판정. 입력 정규화는 파이프라인 쪽에서 통일 예정 |
 | 13 | `pnpm server`를 실행해도 아무 출력이 없음 | 해결 | pnpm 자체 명령과 이름 충돌 → `pnpm harness`로 변경 |
+| 14 | Gemini 호출 시간 초과 | 해결 | 생각 수준 `minimal` |
+| 15 | Eureka 확인 질문의 모델 화면 문장이 필수 문구 누락 | 관찰 | 고정 문구 사용, 규칙은 팀과 결정 |
+| 16 | Eureka에 PR 연결 필드 없음, 단계 기록은 웹 화면에 안 보임 | 우회 + 문의 | 단계 기록(note) API로 PR 주소 읽기, 화면 문제는 Eureka 담당자 문의 |
+| 17 | 실제 시험: 기록의 PR로 G-01, 같은 PR 재승인도 approved 기록 남음 (2026-10-24) | 확인 | `pnpm demo --item` 흐름 동작 |
 
 ---
 
@@ -336,6 +340,14 @@ gh api repos/ehgjs0866/personal_MCP_test/commits/293300b/check-runs --jq ".check
 - 판단: 검증이 의도대로 작동했다. 고정 문구로 대신 말했고 질문 내용은 정확했다. 실행에는 영향 없음 (확인 질문은 고정 문자열이 기준).
 - 남은 일(미정): 화면 문장에서도 확인 질문 전체를 요구할지, 화면은 짧은 요약만 허용할지 팀과 정한다. 정하기 전까지 코드는 바꾸지 않는다.
 - 같은 시험 결과: `complete_stage` succeeded, 외부 증거 `eureka/stage_status_change id=1000195 {"status":"done"}`, Eureka 화면에서 완료 확인. 콘솔 `yes`는 GitHub·Eureka 각 1회.
+
+## 16. Eureka 업무에 PR 연결 필드가 없음 → 단계 기록(note) 사용 (2026-10-24)
+
+- 확인(`pnpm eureka:fields`): 업무·단계·프로세스에 PR이나 설명을 담을 필드가 없다. 업무 `description`도 없음(#8). `createdAt`·`updatedAt`·`deletedAt`은 기록용이고, 마감은 업무 `dueAt`(4건 중 2건만), 완료 시각은 단계 `completedAt`.
+- 단계 목록 응답의 `note$$`는 `{id, stereo:"comment"}`만 준다. 본문은 PDF에 없는 경로 `GET /_api_/notes/0/list?sites&detail=true&stageId=` 또는 `GET /_api_/notes/{id}`의 `content`에 있다 (`pnpm eureka:fields 1000020 --notes`로 확인). `GET /_api_/stages/{id}`도 동작한다.
+- 결정(D-21): 단계 기록에 `PR: https://github.com/<owner>/<repo>/pull/<번호>`를 남기고, `eureka.links`가 이를 읽어 대상 PR과 완료할 단계를 정한다.
+- 남은 문제: **Eureka 웹 화면에서 남긴 기록이 보이지 않는다** (API로는 저장·조회됨). 같은 기록이 두 번 저장된 것(1000017·1000018)도 화면에 안 보여 다시 누른 결과로 보임 → Eureka 담당자에게 문의.
+- 보류: 허용 저장소 목록, 작성자 제한(담당자 기록만), 기록 목록 페이지 넘김(지금 50건까지).
 
 ## 참고: 의도한 동작 (문제 아님)
 

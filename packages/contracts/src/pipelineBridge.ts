@@ -165,6 +165,8 @@ export type PipelineReminderItem = z.infer<typeof PipelineReminderItem>;
 
 export const PipelineRemindersRequest = z.object({ requestId: Id }).passthrough();
 export const PipelineReminderRequest = z.object({ requestId: Id, itemId: Id }).passthrough();
+/** eureka.links (파이프라인 문서에 없음, P-19): 업무 단계 기록에서 연결된 PR을 찾는다. 결과는 PrLinkLookup */
+export const PipelineLinksRequest = z.object({ requestId: Id, itemId: Id }).passthrough();
 export const PipelineRemindersResult = z.object({
   items: z.array(PipelineReminderItem),
   /** 설명·마감이 없어 뺀 업무 수 (보고용) */

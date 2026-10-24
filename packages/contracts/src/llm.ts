@@ -19,7 +19,9 @@ export type LlmErrorCode =
   | 'budget_exceeded'
   | 'bad_request'
   | 'unavailable'
-  | 'invalid_output';
+  | 'invalid_output'
+  /** 동시 호출 상한에 걸려 짧게 기다려도 자리가 나지 않음 (D-24). 호출하지 않았다 */
+  | 'busy';
 
 /** 어댑터 공통 오류. 공급자별 오류는 이 코드로 바꿔서 던진다 */
 export class LlmError extends Error {

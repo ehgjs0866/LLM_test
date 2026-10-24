@@ -38,13 +38,29 @@ export interface HarnessWsServerOptions {
   helloTimeoutMs?: number;
   /** 같은 messageId 응답을 기억하는 개수 */
   replayCacheSize?: number;
-  /** 서버 전체 동시 처리 상한 (연결 수와 무관). 기본 32 */
+  /** 서버 전체 동시 처리 상한 (연결 수와 무관, control 칸 제외). 기본 32 */
   maxInFlightTotal?: number;
+  /**
+   * 칸별 동시 처리 상한 (D-24). 입구 상한은 폭주 방지용이고, 실제 자원 상한은 LLM·GitHub·Eureka 호출마다 따로 둔다.
+   * - work: harness.*·output.* (LLM을 쓸 수 있음). 기본 16
+   * - eureka: eureka.execute/reminders/reminder/links. 기본 16
+   * - control: pipeline.event·harness.cancel·*.reconcile — 승인 흐름이 입구에서 막히지 않도록 다른 칸·연결 상한과 별도. 기본 64
+   */
+  maxInFlightByLane?: Partial<Record<Lane, number>>;
   /** snapshot 전송 전에 모아 둘 이벤트 상한. 넘으면 그 연결을 닫아 다시 구독하게 한다. 기본 1000 */
   maxPendingEvents?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
+
+export type Lane = 'work' | 'eureka' | 'control';
+const CONTROL_KINDS = new Set(['pipeline.event', 'harness.cancel', 'harness.reconcile', 'eureka.reconcile']);
+export function laneOf(kind: string): Lane {
+  if (CONTROL_KINDS.has(kind)) return 'control';
+  if (kind.startsWith('eureka.')) return 'eureka';
+  return 'work';
+}
+const LANE_DEFAULTS: Record<Lane, number> = { work: 16, eureka: 16, control: 64 };
 
 interface Conn {
   id: number;
@@ -65,6 +81,7 @@ export class HarnessWsServer {
   private wss?: WebSocketServer;
   private readonly conns = new Set<Conn>();
   private readonly inFlight = new Set<Promise<unknown>>();
+  private readonly laneInFlight: Record<Lane, number> = { work: 0, eureka: 0, control: 0 };
   private readonly replies = new Map<string, CachedReply>();
   private readonly tokenDigest: Buffer;
   private readonly viewerDigest?: Buffer;
@@ -222,10 +239,16 @@ export class HarnessWsServer {
     }
     // 이미 기한이 지난 요청은 실행하지 않는다. 위의 재전달 응답은 실행 결과이므로 그대로 돌려준다 (감사 F-05)
     if (env.deadlineAt && Date.parse(env.deadlineAt) <= (this.o.now ?? Date.now)()) return this.send(conn, fail('deadline_exceeded', 'envelope deadline already passed; not executed'));
-    if (this.inFlight.size >= (this.o.maxInFlightTotal ?? 32)) return this.send(conn, fail('too_many_in_flight', 'server is at its concurrent request limit'));
-    if (conn.inFlight >= (this.o.maxInFlightPerConnection ?? 8)) return this.send(conn, fail('too_many_in_flight', 'too many concurrent requests on this connection'));
+    const lane = laneOf(env.kind);
+    const laneCap = this.o.maxInFlightByLane?.[lane] ?? LANE_DEFAULTS[lane];
+    if (this.laneInFlight[lane] >= laneCap) return this.send(conn, fail('too_many_in_flight', `server is at its concurrent limit for ${lane} requests`));
+    if (lane !== 'control') {
+      if (this.laneInFlight.work + this.laneInFlight.eureka >= (this.o.maxInFlightTotal ?? 32)) return this.send(conn, fail('too_many_in_flight', 'server is at its concurrent request limit'));
+      if (conn.inFlight >= (this.o.maxInFlightPerConnection ?? 8)) return this.send(conn, fail('too_many_in_flight', 'too many concurrent requests on this connection'));
+    }
 
-    conn.inFlight += 1;
+    if (lane !== 'control') conn.inFlight += 1;
+    this.laneInFlight[lane] += 1;
     const reply = this.execute(clampPayloadDeadline(env));
     this.remember(env.messageId, { fingerprint, reply });
     this.inFlight.add(reply);
@@ -233,7 +256,8 @@ export class HarnessWsServer {
       const frame = await reply;
       this.send(conn, frame); // 연결이 끊겼으면 보내지 않는다. 결과는 Harness 기록·같은 turnId 재전송으로 얻는다
     } finally {
-      conn.inFlight -= 1;
+      if (lane !== 'control') conn.inFlight -= 1;
+      this.laneInFlight[lane] -= 1;
       this.inFlight.delete(reply);
     }
   }
@@ -286,6 +310,20 @@ export class HarnessWsServer {
       }
       else this.send(conn, { type: 'event', event });
     }
+  }
+
+  /**
+   * 요청이 끝난 뒤 확정된 결과를 pipeline 연결에 알린다 (D-23: 늦게 끝난 Eureka 반영, 주기 복구 결과).
+   * 연결이 없으면 버린다 — 같은 변경은 operation.updated 이벤트와 snapshot으로도 확인할 수 있다.
+   */
+  notify(notice: unknown, resultText: string): number {
+    let sent = 0;
+    for (const conn of this.conns) {
+      if (conn.role !== 'pipeline') continue;
+      this.send(conn, { type: 'notice', notice, resultText });
+      sent += 1;
+    }
+    return sent;
   }
 
   // -------------------------------------------------------------------- output

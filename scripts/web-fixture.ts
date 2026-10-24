@@ -17,6 +17,12 @@ const PIPELINE = 'fixture-pipeline-token-123';
 const w = createWorld();
 // 리마인더 확인용: 설명·마감이 있는 업무 (fixture)
 w.eurekaServer.addItem({ id: '2001', name: '보고서 제출', description: '실험 결과를 비교하고 분석 보고서를 제출한다.', dueAt: w.clock.nowMs() + 26 * 3600_000, stages: [{ id: '20011', name: '작성', status: 'doing', order: 1 }] });
+// eureka.links 시험용: 골든 업무(ITEM_ID)의 'PR 승인' 단계 기록에 PR 주소 (pnpm demo:adapter --fixture links 1000006)
+{
+  const golden = [...w.eurekaServer.items.values()].find((i) => i.name === '캡스톤 PR 검토');
+  const st = golden?.stages.find((x) => x.name === 'PR 승인');
+  if (st) st.notes = [{ id: 'fixture-note-1', content: 'PR: https://github.com/NewLine/DeskPet/pull/42' }];
+}
 const step = () => w.clock.advance(20_000);
 
 await review(w, 'req-review-1'); // 완료

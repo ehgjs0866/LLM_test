@@ -9,13 +9,14 @@
  *   pnpm demo 12                      # PR 번호 지정
  *   pnpm demo 12 --answer "응, 승인해"  # 확인 질문 답변을 미리 지정
  *   pnpm demo 12 --ask "이 PR 뭐가 바뀌었어?" [--intent pr.summary]
+ *   pnpm demo --item 1000020          # Eureka 업무 단계 기록의 PR 주소로 대상 PR·완료할 단계를 찾는다 (G-01 시작부)
  *
- * GitHub 쓰기 허용은 서버 옵션이다 (pnpm harness --allow-github-writes, 전송 직전 서버 콘솔에서 yes).
+ * GitHub·Eureka 쓰기 허용은 서버 옵션이다 (pnpm harness --allow-github-writes --allow-eureka-writes). 승인은 이 데모의 답변만으로 받는다 (D-22).
  * .env: HARNESS_WS_URL(기본 ws://127.0.0.1:8787), HARNESS_WS_TOKEN, GITHUB_TEST_REPO, GITHUB_TEST_PR,
  *       DEMO_EUREKA_ITEM_ID, DEMO_EUREKA_STAGE_ID (선택)
  */
 import { createInterface } from 'node:readline/promises';
-import type { ContextPacket, CurrentTurnInput, HarnessResult, OutputContent } from '@deskpet/contracts';
+import type { ContextPacket, CurrentTurnInput, HarnessResult, OutputContent, PrLinkLookup } from '@deskpet/contracts';
 import { HarnessClient } from './harnessClient.js';
 
 try {
@@ -29,10 +30,11 @@ const valueOf = (flag: string) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const valueIdx = new Set(['--answer', '--ask', '--intent'].map((f) => args.indexOf(f)).filter((i) => i >= 0).map((i) => i + 1));
+const valueIdx = new Set(['--answer', '--ask', '--intent', '--item'].map((f) => args.indexOf(f)).filter((i) => i >= 0).map((i) => i + 1));
 const presetAnswer = valueOf('--answer');
 const askText = valueOf('--ask');
 const askIntent = valueOf('--intent') ?? 'pr.summary';
+const linkItem = valueOf('--item');
 const prArg = args.find((a, i) => /^\d+$/.test(a) && !valueIdx.has(i));
 const fail = (msg: string): never => {
   console.log(`✗ ${msg}`);
@@ -41,25 +43,54 @@ const fail = (msg: string): never => {
 if (args.includes('--allow-github-writes')) console.log('! --allow-github-writes는 서버 옵션으로 옮겨졌어요: pnpm harness --allow-github-writes');
 
 const token = env['HARNESS_WS_TOKEN']?.trim() || fail('HARNESS_WS_TOKEN이 비어 있어요 (서버와 같은 값)');
-const [owner, name] = (env['GITHUB_TEST_REPO'] ?? '').split('/');
-if (!owner || !name) fail('GITHUB_TEST_REPO=owner/name 이 필요해요');
-const prNumber = Number(prArg ?? env['GITHUB_TEST_PR']);
-if (!prNumber) fail('PR 번호가 필요해요 (pnpm demo 12 또는 .env의 GITHUB_TEST_PR)');
+let [owner, name] = (env['GITHUB_TEST_REPO'] ?? '').split('/');
+let prNumber = Number(prArg ?? env['GITHUB_TEST_PR']);
+if (!linkItem) {
+  if (!owner || !name) fail('GITHUB_TEST_REPO=owner/name 이 필요해요');
+  if (!prNumber) fail('PR 번호가 필요해요 (pnpm demo 12 또는 .env의 GITHUB_TEST_PR)');
+}
 const runId = Date.now().toString(36);
 const client = new HarnessClient(env['HARNESS_WS_URL']?.trim() || 'ws://127.0.0.1:8787', runId);
 
 // ------------------------------------------------- 파이프라인 흉내 (라우팅·ContextPacket)
-const repository = { owner: owner!, name: name! };
-const itemId = env['DEMO_EUREKA_ITEM_ID'];
-const stageId = env['DEMO_EUREKA_STAGE_ID'];
-const context: ContextPacket = {
-  contextId: `ctx-demo-${runId}`,
-  version: 1,
-  target: { kind: 'github_pr', repository, prNumber },
-  candidates: [],
-  relatedTurns: [],
-  taskRefs: itemId && stageId ? [{ itemId, stageId, repository, prNumber, source: { kind: 'eureka', ref: `item:${itemId}` } }] : [],
-};
+let itemId = env['DEMO_EUREKA_ITEM_ID'];
+let stageId = env['DEMO_EUREKA_STAGE_ID'];
+let context: ContextPacket;
+function buildContext(ref?: string) {
+  const repository = { owner: owner!, name: name! };
+  context = {
+    contextId: `ctx-demo-${runId}`,
+    version: 1,
+    target: { kind: 'github_pr', repository, prNumber },
+    candidates: [],
+    relatedTurns: [],
+    taskRefs: itemId && stageId ? [{ itemId, stageId, repository, prNumber, source: { kind: 'eureka', ref: ref ?? `item:${itemId}` } }] : [],
+  };
+}
+if (!linkItem) buildContext();
+
+/** --item: 파이프라인이 리마인더 업무에서 PR을 채우는 단계를 흉내 낸다 (eureka.links) */
+async function resolveFromEureka(id: string) {
+  const req = `demo-links-${runId}`;
+  const r = (await call('eureka.links', req, { requestId: req, itemId: id }, false)) as PrLinkLookup;
+  console.log(`\n── 0) Eureka 업무 ${id}${r.itemName ? ` (${r.itemName})` : ''} 기록에서 PR 찾기: ${r.status} ──`);
+  for (const l of r.links) console.log(`  · ${l.repository.owner}/${l.repository.name}#${l.prNumber} — 단계 ${l.stageId} '${l.stageName}' [${l.stageStatus}] (기록 ${l.noteId})`);
+  const why: Record<string, string> = {
+    none: '단계 기록에 PR 주소가 없어요. 완료할 단계의 기록에 "PR: https://github.com/<owner>/<repo>/pull/<번호>"를 남겨 주세요.',
+    ambiguous: 'PR 또는 단계 후보가 여러 개예요. 추측하지 않고 멈춥니다 (실제 흐름에서는 사용자에게 고르게 함).',
+    partial: '일부 기록을 읽지 못해 확정하지 않았어요. 잠시 뒤 다시 시도하세요.',
+    failed: 'Eureka 업무 목록을 가져오지 못했어요.',
+    not_found: '업무를 찾지 못했어요 (완료·삭제됐거나 번호가 다름).',
+  };
+  if (r.status !== 'linked') fail(why[r.status] ?? r.status);
+  const l = r.links[0]!;
+  owner = l.repository.owner;
+  name = l.repository.name;
+  prNumber = l.prNumber;
+  itemId = l.itemId;
+  stageId = l.stageId;
+  buildContext(`item:${l.itemId}/stage:${l.stageId}/note:${l.noteId}`);
+}
 let turnSeq = 0;
 const turn = (text: string, intention: string): CurrentTurnInput => ({
   conversationId: 'demo-conv',
@@ -148,6 +179,7 @@ async function ask(question: string): Promise<string | undefined> {
 // ------------------------------------------------------------------ 흐름
 async function main() {
   const w = await client.connect(token, 'pipeline');
+  if (linkItem) await resolveFromEureka(linkItem);
   client.subscribe();
   console.log(`DeskPet 데모 클라이언트 — ${owner}/${name}#${prNumber} (서버 ${w.protocol}, epoch ${w.epoch})`);
   console.log(itemId && stageId ? `Eureka 연결: item ${itemId} / stage ${stageId}` : 'Eureka 연결 없음 (DEMO_EUREKA_ITEM_ID/STAGE_ID 미설정 → 후속 반영 단계 생략)');
@@ -182,6 +214,14 @@ async function main() {
       newCallConstraints: constraints(),
     })) as HarnessResult;
     spoken = await show(`${step}) 답변 처리`, r);
+  }
+
+  // Eureka 반영이 늦어 '진행 중'으로 답했으면 서버 알림(notice)을 잠시 기다린다 (D-23)
+  if ((r.facts['stageCompletion'] as { status?: string } | undefined)?.status === 'in_progress') {
+    console.log('\n  … Eureka 반영 결과 알림을 기다립니다 (최대 20초)');
+    const until = Date.now() + 20_000;
+    while (client.notices === 0 && Date.now() < until) await new Promise((res) => setTimeout(res, 200));
+    if (client.notices === 0) console.log('  알림을 받지 못했어요. pnpm db ops로 결과를 확인하세요.');
   }
 
   const mine = [...client.entities.values()].filter((e) => e.entityType === 'operation' && String(e.state['requestId'] ?? '').endsWith(`-${runId}`));

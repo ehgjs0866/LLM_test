@@ -6,11 +6,13 @@
  *   pnpm harness                                         # 다른 터미널에서 먼저 실행
  *   pnpm demo:adapter reminders                          # EurekaAdapter.reminders()
  *   pnpm demo:adapter reminder <itemId>                  # EurekaAdapter.reminder(itemId)
+ *   pnpm demo:adapter links <itemId>                     # eureka.links: 단계 기록의 PR 주소 → 연결된 PR (P-19)
  *   pnpm demo:adapter eureka list                        # execute: eureka.list
  *   pnpm demo:adapter eureka status "업무 이름"            # execute: eureka.status
  *   pnpm demo:adapter eureka postpone "업무 이름" 2026-10-20T23:59:00+09:00 [--approve]
  *                                                        # 쓰기: --approve 없으면 확인 질문만, 있어도 서버에서 Eureka 쓰기는 꺼져 있음
  *   pnpm demo:adapter harness [PR번호] [--answer "응, 승인해"]
+ *   pnpm demo:adapter harness --item <itemId>            # 위와 같되 대상 PR·완료할 단계를 eureka.links로 찾는다
  *                                                        # HarnessAdapter.run: 리뷰 → 승인 질문 → output.generate → 전달 보고 → 답변
  *
  * .env: HARNESS_WS_URL(기본 ws://127.0.0.1:8787), HARNESS_WS_TOKEN, GITHUB_TEST_REPO, GITHUB_TEST_PR
@@ -103,11 +105,29 @@ async function eureka() {
 }
 
 // --------------------------------------------------------------- harness
+async function links(itemId: string) {
+  const requestId = id('adapter-links');
+  return (await call('eureka.links', requestId, { requestId, itemId }, false)) as {
+    status: string;
+    links: { repository: { owner: string; name: string }; prNumber: number; itemId: string; stageId: string; stageName: string; noteId: string }[];
+  };
+}
+
 async function harness() {
-  const [owner, repoName] = (env['GITHUB_TEST_REPO'] ?? '').split('/');
-  if (!owner || !repoName) fail('GITHUB_TEST_REPO=owner/name 이 필요해요');
+  let [owner, repoName] = (env['GITHUB_TEST_REPO'] ?? '').split('/');
   const answerIdx = args.indexOf('--answer');
-  const prNumber = Number(args.find((a, i) => i > 0 && i !== answerIdx + 1 && /^\d+$/.test(a)) ?? env['GITHUB_TEST_PR']);
+  const itemIdx = args.indexOf('--item');
+  let prNumber = Number(args.find((a, i) => i > 0 && i !== answerIdx + 1 && i !== itemIdx + 1 && /^\d+$/.test(a)) ?? env['GITHUB_TEST_PR']);
+  let taskRefs: unknown[] = [];
+  if (itemIdx >= 0) {
+    const r = await links(args[itemIdx + 1] ?? fail('--item 뒤에 업무 번호가 필요해요'));
+    show('0) eureka.links', r);
+    if (r.status !== 'linked') fail(`연결된 PR을 하나로 정하지 못했어요 (${r.status})`);
+    const l = r.links[0]!;
+    [owner, repoName, prNumber] = [l.repository.owner, l.repository.name, l.prNumber];
+    taskRefs = [{ itemId: l.itemId, stageId: l.stageId, repository: l.repository, prNumber: l.prNumber, source: { kind: 'eureka', ref: `item:${l.itemId}/stage:${l.stageId}/note:${l.noteId}` } }];
+  }
+  if (!owner || !repoName) fail('GITHUB_TEST_REPO=owner/name 이 필요해요');
   if (!prNumber) fail('PR 번호가 필요해요');
   const target = { kind: 'github_pr', repository: { owner, name: repoName }, prNumber };
   const conversationId = `adapter-conv-${runId}`;
@@ -119,6 +139,7 @@ async function harness() {
       context: { requestId, turnId: id('turn'), transcript, stamp: { conversationId }, turns: [] },
       wikiSearchAllowed: false,
       mutationApproved,
+      ...(taskRefs.length ? { taskRefs } : {}),
     }) as Promise<{ action: { status: string; facts: Record<string, string> }; question: string | null; resultText: string | null }>;
   };
 
@@ -161,9 +182,10 @@ async function main() {
     const itemId = args[1] ?? fail('itemId가 필요해요');
     const requestId = id('adapter-rem');
     show('eureka.reminder', await call('eureka.reminder', requestId, { requestId, itemId }, false));
-  } else if (cmd === 'eureka') await eureka();
+  } else if (cmd === 'links') show('eureka.links', await links(args[1] ?? fail('itemId가 필요해요')));
+  else if (cmd === 'eureka') await eureka();
   else if (cmd === 'harness') await harness();
-  else fail('명령: reminders | reminder <itemId> | eureka list|status|postpone | harness [PR번호]');
+  else fail('명령: reminders | reminder <itemId> | links <itemId> | eureka list|status|postpone | harness [PR번호] [--item <itemId>]');
 }
 
 main()

@@ -1,4 +1,4 @@
-import type { RequiredChecksSource, RequiredChecksUnknownReason, ViewerPermission } from '@deskpet/contracts';
+import type { ConcurrencyLimiter, RequiredChecksSource, RequiredChecksUnknownReason, ViewerPermission } from '@deskpet/contracts';
 import { FetchHttpClient, HttpTransportError, type HttpClient, type HttpResponse } from '../http.js';
 import { parseErrorBody } from '../result.js';
 import {
@@ -27,6 +27,8 @@ export interface RestGitHubTransportOptions {
   allowWrites?: boolean;
   http?: HttpClient;
   fetchImpl?: typeof fetch;
+  /** GitHub 동시 호출 상한 (D-24) */
+  limiter?: ConcurrencyLimiter;
 }
 
 export class RestGitHubTransport implements GitHubTransport {
@@ -53,6 +55,7 @@ export class RestGitHubTransport implements GitHubTransport {
           'user-agent': 'deskpet-harness-mvp',
         }),
         o.fetchImpl,
+        o.limiter,
       );
   }
 

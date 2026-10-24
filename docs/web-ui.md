@@ -36,7 +36,22 @@ pnpm web:dev        # 터미널 2 → http://127.0.0.1:5173 에서 서버 주소
 - 토큰은 sessionStorage에만 두며 탭을 닫으면 지워진다.
 - 실제 API 없이 화면만 보려면: `pnpm web:fixture` (ws://127.0.0.1:8788, 토큰 `fixture-viewer-token-123`) + `pnpm web:dev`.
 
+### 실제 서버에 붙이기 (2026-10-24)
+
+1. `.env`에 `HARNESS_WS_VIEWER_TOKEN`(16자 이상, `HARNESS_WS_TOKEN`과 다른 값)과 `HARNESS_WS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`을 넣는다.
+2. `pnpm harness` — 시작 화면에 `웹 화면: 보기 전용 토큰 설정됨, 허용 Origin …`이 보여야 한다. `꺼짐`이면 1을 확인한다.
+3. `pnpm web:dev` → 브라우저에서 `http://127.0.0.1:5173` (주소창 Origin이 허용 목록과 같아야 한다. `localhost`로 열면 `http://localhost:5173`이 목록에 있어야 함).
+4. 서버 주소 `ws://127.0.0.1:8787`, 토큰 칸에 **보기 전용 토큰**을 넣고 연결.
+5. 다른 터미널에서 `pnpm demo …`를 돌리면 작업이 실시간으로 추가·갱신된다.
+
+| 증상 | 원인 |
+| --- | --- |
+| 연결 직후 끊김(4001) | 토큰이 틀렸거나 pipeline 토큰을 넣음 |
+| 연결 자체가 거부(403) | 브라우저 Origin이 `HARNESS_WS_ALLOWED_ORIGINS`에 없음 |
+| 목록이 비어 있음 | 저장소가 메모리(`DESKPET_STORE_PATH` 없음)이고 서버를 다시 켰음 |
+
 ## 검증
 
 - `apps/web/test/model.test.ts`: 원본 상태 → 표시 상태 매핑, 닫힌 질문 제외, 정렬, 검색·필터.
 - fixture 서버 + 브라우저(Chromium)로 연결, 목록, 키보드 선택, 오류 펼침, 상태 필터, 서버 종료 시 연결 끊김 알림을 확인했다.
+- 2026-10-24: **실제 서버 스크립트(`scripts/server.ts`)** + `pnpm web:dev` + Chromium으로 보기 전용 토큰 연결, `pnpm demo:adapter harness`가 만든 작업이 실시간으로 목록에 나타나는 것을 확인했다 (GitHub·Eureka 키는 가짜 값이라 작업은 '실패'로 표시됨).

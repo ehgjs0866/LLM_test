@@ -31,6 +31,8 @@ export interface PolicyConfig {
   githubToolTimeoutMs: number;
   /** LLM 보조 Guide 호출 시간 상한(ms). 미정 (실측: gemini-3.1-flash-lite 단계 제안 약 3초) */
   llmGuideTimeoutMs: number;
+  /** Eureka 반영 동의 뒤 결과를 기다리는 시간(ms). 넘으면 '진행 중'으로 답하고 끝나면 알림 (D-23). 미정 */
+  followUpReplyWaitMs: number;
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -49,4 +51,5 @@ export const DEFAULT_POLICY: PolicyConfig = {
   eurekaTotalTimeoutMs: 8_000,
   githubToolTimeoutMs: 30_000,
   llmGuideTimeoutMs: 8_000,
+  followUpReplyWaitMs: 3_000,
 };

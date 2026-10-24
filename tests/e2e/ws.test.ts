@@ -308,3 +308,18 @@ describe('Harness WebSocket 경계 — 서버 전체 상한 (감사 F-07)', () =
     expect(reply).toMatchObject({ ok: false, error: { code: 'too_many_in_flight' } });
   });
 });
+
+describe('notice (D-23): 요청이 끝난 뒤 확정된 결과는 pipeline 연결에만 보낸다', () => {
+  it('pipeline은 받고 viewer는 받지 않는다', async () => {
+    const { server, url } = await boot();
+    const p = new TestClient(url);
+    await p.hello('pipeline');
+    const v = new TestClient(url);
+    await v.hello('viewer').catch(() => undefined);
+    expect(server.notify({ noticeId: 'n-1', source: 'recovery' }, 'Eureka 반영을 확인했어요.')).toBe(1);
+    const f = await p.waitFor((x) => x.type === 'notice');
+    expect(f).toMatchObject({ notice: { noticeId: 'n-1' }, resultText: 'Eureka 반영을 확인했어요.' });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(v.frames.some((x) => x.type === 'notice')).toBe(false);
+  });
+});

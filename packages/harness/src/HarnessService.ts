@@ -31,6 +31,9 @@ import {
   type SensorAssessment,
   type SourceRef,
   type TaskRef,
+  type FollowUpNotice,
+  confirmationTokens,
+  extractPrLinks,
   deliveredQuestionMatches,
 } from '@deskpet/contracts';
 import { StoreDispatchOwner } from './dispatch/DispatchOwner.js';
@@ -39,7 +42,7 @@ import { RuleBasedGuide, type Guide, type GuideFacts } from './guide/Guide.js';
 import { LlmGuide, RuleFirstGuide } from './guide/LlmGuide.js';
 import { DEFAULT_POLICY, type PolicyConfig } from './policy/config.js';
 import { expectedOutcomeFor } from './policy/expectedOutcome.js';
-import { classifyAnswer } from './policy/inputPolicy.js';
+import { classifyAnswer, writeInputBlockers } from './policy/inputPolicy.js';
 import type { WikiReader } from './ports.js';
 import type { Clock, IdGen } from './runtime/clock.js';
 import { DeterministicSensor, type Sensor } from './sensor/Sensor.js';
@@ -67,6 +70,8 @@ export interface HarnessDeps {
   sensor?: Sensor;
   wiki?: WikiReader;
   holderId?: string;
+  /** 요청이 끝난 뒤 확정된 결과 알림 (잠깐 기다려도 끝나지 않은 Eureka 반영, 주기 복구 결과). D-23 */
+  onFollowUp?: (n: FollowUpNotice) => void;
 }
 
 export interface CancellationSignal {
@@ -91,6 +96,8 @@ interface RequestMeta {
   abort: AbortController;
   /** 마지막으로 쓴 시각. 오래된 항목 정리용 (감사 F-07) */
   touchedAtMs: number;
+  /** 응답을 먼저 돌려준 뒤에도 진행 중인 후속 작업. 끝날 때까지 메타를 지우지 않는다 */
+  backgroundRunning?: boolean;
 }
 
 /** 메모리에 들고 있는 요청 상태 상한 (감사 F-07). 끝난 요청은 바로 지우고, 답변 대기 요청만 남긴다 */
@@ -108,6 +115,8 @@ export class HarnessService {
   private readonly holderId: string;
   private readonly owner: StoreDispatchOwner;
   private readonly requests = new Map<string, RequestMeta>();
+  private readonly background = new Set<Promise<unknown>>();
+  private noticeSeq = 0;
 
   constructor(private readonly d: HarnessDeps) {
     this.cfg = d.config ?? DEFAULT_POLICY;
@@ -126,7 +135,7 @@ export class HarnessService {
     if (dup) return dup; // 동일 turnId 재전달은 저장된 결과로 응답
 
     const meta = this.meta(req.requestId, req.currentTurn, req.context, req.constraints.deadlineAt, intentOf(req.currentTurn));
-    const result = await this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints);
+    const result = RETRY_INTENTS.has(meta.intent) ? await this.retryStageCompletion(meta, req.currentTurn, req.context, req.constraints) : await this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints);
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
     this.settle(result);
     return result;
@@ -238,7 +247,214 @@ export class HarnessService {
     if (conf.scope.action === 'submit_approval') {
       return this.executeApproval(meta, prepared.operation, prepared.authority, constraints);
     }
-    return this.executeStageCompletion(meta, prepared.operation, prepared.authority, constraints);
+    return this.stageCompletionWithWait(meta, prepared.operation, prepared.authority, constraints);
+  }
+
+  // ============================================================ follow-up (D-23)
+  /**
+   * Eureka 반영을 실행하고 followUpReplyWaitMs만 기다린다. 그 안에 끝나면 결과를, 아니면 '진행 중'을 돌려주고
+   * 끝난 결과는 onFollowUp 알림으로 보낸다. 실행 자체는 호출 deadline 안에서만 진행한다 (늘리지 않음).
+   */
+  private async stageCompletionWithWait(meta: RequestMeta, op: OperationRecord, authority: ExecutionAuthority, constraints: ExecutionConstraints): Promise<HarnessResult> {
+    const work = this.executeStageCompletion(meta, op, authority, constraints);
+    const waitMs = this.cfg.followUpReplyWaitMs;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = Symbol('late');
+    const first = await Promise.race([work, new Promise<typeof late>((r) => (timer = setTimeout(() => r(late), Math.max(0, waitMs))))]);
+    if (timer) clearTimeout(timer);
+    if (first !== late) return first;
+    meta.backgroundRunning = true;
+    const t = op.target as EurekaStageTarget;
+    const tracked = work
+      .then((r) => {
+        const ar = r.actionResults.find((a) => a.action === 'complete_stage');
+        this.emitNotice('late_completion', r, op.operationId, 'complete_stage', ar?.status ?? (r.facts['assessmentPending'] ? 'assessment_pending' : r.disposition));
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        meta.backgroundRunning = false;
+        this.background.delete(tracked);
+        this.settle({ requestId: meta.requestId, disposition: 'completed', actionResults: [], facts: {}, sources: [], processingErrors: [] });
+      });
+    this.background.add(tracked);
+    return this.result(meta, 'completed', [], {
+      stageCompletion: { status: 'in_progress', operationId: op.operationId, itemId: t.itemId, stageId: t.stageId, stageName: op.actualRequest['stageName'] },
+    });
+  }
+
+  /** 응답 뒤에도 진행 중인 후속 작업이 끝날 때까지 기다린다 (서버 종료·테스트용) */
+  async drainBackground(): Promise<void> {
+    while (this.background.size) await Promise.allSettled([...this.background]);
+  }
+
+  /**
+   * 주기 복구(RecoveryWorker)가 확정한 결과를 알린다. 요청 경로 안의 reconcile은 알리지 않는다 (그 응답에 이미 포함).
+   * GitHub 승인이 성공으로 확정되면 연결된 Eureka 단계의 상태와 기록을 다시 보고, 반영할 수 있을 때만 후속 확인 질문을
+   * 만들어 같이 보낸다 (D-24). 질문을 만들지 않은 이유는 facts.followUp에 남는다.
+   */
+  async notifyRecovered(op: OperationRecord, actionResult: ActionResult): Promise<HarnessResult> {
+    const facts: Record<string, unknown> = { recovered: { operationId: op.operationId, action: op.action } };
+    if (op.action === 'complete_stage' && op.target.kind === 'eureka_stage') {
+      facts['stageCompletion'] = { status: actionResult.status, itemId: op.target.itemId, stageId: op.target.stageId, stageName: op.actualRequest['stageName'] };
+    }
+    let result: HarnessResult = { requestId: op.requestId, disposition: 'completed', actionResults: [actionResult], facts, sources: [], processingErrors: [] };
+    if (op.action === 'submit_approval' && actionResult.status === 'succeeded') {
+      result = await this.followUpAfterRecovery(op, actionResult, facts).catch(() => result);
+    }
+    this.emitNotice('recovery', result, op.operationId, op.action, actionResult.status);
+    return result;
+  }
+
+  private async followUpAfterRecovery(op: OperationRecord, approval: ActionResult, facts: Record<string, unknown>): Promise<HarnessResult> {
+    const plain = (followUp: Record<string, unknown>): HarnessResult => ({ requestId: op.requestId, disposition: 'completed', actionResults: [approval], facts: { ...facts, followUp }, sources: [], processingErrors: [] });
+    const linked = op.actualRequest['linkedStage'] as TaskRef | undefined;
+    if (!linked?.stageId) return plain({ eligibility: 'not_applicable', reason: 'no_linked_eureka_stage' });
+    // 이미 후속 작업이 있거나 질문을 기다리는 중이면 새로 묻지 않는다
+    const existing = (await this.d.store.listOperations(op.requestId)).find((o) => o.action === 'complete_stage' && o.actualRequest['approvalOperationId'] === op.operationId);
+    if (existing) return plain({ eligibility: 'not_applicable', reason: 'followup_operation_exists', operationId: existing.operationId });
+    if ((await this.d.store.listWaitingPendings(op.requestId)).length) return plain({ eligibility: 'not_applicable', reason: 'question_already_waiting' });
+
+    const deadlineAt = new Date(this.d.clock.nowMs() + 30_000).toISOString();
+    const t = op.target as GitHubPrTarget;
+    // Eureka 기록 확인: 기록에서 찾은 연결이면 그 기록에 PR 주소가 아직 있는지 본다 (지워졌으면 묻지 않음)
+    if (linked.source.ref.includes('note:') && this.d.eureka.listStageNotes) {
+      const notes = await this.d.eureka.listStageNotes({ stageId: linked.stageId }, { deadlineAt });
+      if (!notes.ok) return plain({ eligibility: 'unverified', conditions: ['eureka_notes_unverified'] });
+      const still = notes.data!.notes.some((n) => extractPrLinks(n.content).some((l) => l.prNumber === t.prNumber && l.owner.toLowerCase() === t.repository.owner.toLowerCase() && l.name.toLowerCase() === t.repository.name.toLowerCase()));
+      if (!still) return plain({ eligibility: 'blocked', conditions: ['eureka_note_link_removed'] });
+    }
+    const meta =
+      this.requests.get(op.requestId) ??
+      this.restoreFromOperation(op, linked, deadlineAt);
+    meta.deadlineAt = deadlineAt;
+    if (!meta.taskRefs.some((r) => r.stageId === linked.stageId)) meta.taskRefs = [...meta.taskRefs, linked];
+    const constraints: ExecutionConstraints = { deadlineAt, maxPages: 3, maxResultBytes: 256_000, policyVersion: this.cfg.policyVersion };
+    const r = await this.followUpAfterApproval(meta, op, approval, constraints, facts);
+    this.settle(r);
+    return r;
+  }
+
+  /** 복구로 확정된 승인 operation에서 요청 메타를 다시 만든다 (재시작 뒤 메모리에 없을 때) */
+  private restoreFromOperation(op: OperationRecord, linked: TaskRef, deadlineAt: string): RequestMeta {
+    const a = op.actualRequest;
+    const m: RequestMeta = {
+      requestId: op.requestId,
+      conversationId: String(a['conversationId'] ?? 'unknown'),
+      contextId: String(a['contextId'] ?? `ctx-recovered-${op.requestId}`),
+      contextVersion: typeof a['contextVersion'] === 'number' ? a['contextVersion'] : 1,
+      intent: 'pr.approve',
+      stateRevision: 1,
+      cancelled: false,
+      eventGap: false,
+      taskRefs: [linked],
+      deadlineAt,
+      abort: new AbortController(),
+      touchedAtMs: this.d.clock.nowMs(),
+    };
+    this.requests.set(op.requestId, m);
+    return m;
+  }
+
+  private emitNotice(source: FollowUpNotice['source'], result: HarnessResult, operationId: string, action: string, status: string) {
+    if (!this.d.onFollowUp) return;
+    try {
+      this.d.onFollowUp({ noticeId: `notice-${this.holderId}-${this.d.clock.nowMs()}-${++this.noticeSeq}`, source, requestId: result.requestId, operationId, action, status, result, observedAt: this.d.clock.nowIso() });
+    } catch {
+      // 알림 실패는 업무 결과에 영향을 주지 않는다
+    }
+  }
+
+  /**
+   * 실패한 Eureka 반영 다시 하기 (D-23: "다시 해줘" 요청 자체를 동의로 본다).
+   * - 같은 대화에서 가장 최근의 complete_stage가 명시적으로 실패(failed)했을 때만. unknown은 다시 보내지 않는다 (주기 복구가 확인)
+   * - 승인 operation이 성공이고, 후속 적합성을 다시 확인해 통과해야 한다
+   * - 기존 확인 기록 규칙을 그대로 쓴다: 새 확인(pending·confirmation)을 만들고 이 턴을 그 답으로 기록한다. 질문 전달 증거는 channel=retry_request
+   * - 쓰기 입력 검사(음성 신뢰도 등)는 일반 승인 답변과 같다
+   */
+  private async retryStageCompletion(meta: RequestMeta, turn: CurrentTurnInput, ctx: ContextPacket, constraints: ExecutionConstraints): Promise<HarnessResult> {
+    const blockers = writeInputBlockers(turn, this.cfg);
+    if (blockers.length) return this.result(meta, 'completed', [], { retry: { status: 'input_blocked', reasons: blockers } });
+    const ops = (await this.d.store.listOperations()).filter((o) => o.action === 'complete_stage' && o.target.kind === 'eureka_stage');
+    const mine: OperationRecord[] = [];
+    for (const o of ops) {
+      const ap = await this.d.store.getOperation(String(o.actualRequest['approvalOperationId'] ?? ''));
+      if (ap && ap.actualRequest['conversationId'] === meta.conversationId) mine.push(o);
+    }
+    const refStage = ctx.taskRefs.find((r) => r.stageId)?.stageId;
+    const candidates = refStage ? mine.filter((o) => (o.target as EurekaStageTarget).stageId === refStage) : mine;
+    const last = candidates[candidates.length - 1];
+    if (!last) return this.result(meta, 'completed', [], { retry: { status: 'nothing_to_retry' } });
+    const lt = last.target as EurekaStageTarget;
+    const base = { operationId: last.operationId, itemId: lt.itemId, stageId: lt.stageId, stageName: last.actualRequest['stageName'] };
+    const st = last.actionResult?.status;
+    if (!st || st === 'unknown' || last.recovery !== 'none' || last.assessment === 'pending') return this.result(meta, 'completed', [], { retry: { status: 'result_unknown', ...base } });
+    if (st === 'succeeded') return this.result(meta, 'completed', [], { retry: { status: 'already_done', ...base } });
+    if (st !== 'failed') return this.result(meta, 'completed', [], { retry: { status: 'nothing_to_retry', ...base } });
+
+    const approvalOp = await this.d.store.getOperation(String(last.actualRequest['approvalOperationId']));
+    if (!approvalOp || approvalOp.actionResult?.status !== 'succeeded') return this.result(meta, 'completed', [], { retry: { status: 'approval_not_confirmed', ...base } });
+    const prTarget = approvalOp.target as GitHubPrTarget;
+    const approvedSha = String(approvalOp.actualRequest['commitId']);
+    const check = await this.followUpEligibility(prTarget, approvedSha, lt.itemId, lt.stageId, constraints);
+    if (check.eligibility !== 'eligible') return this.result(meta, 'completed', [], { retry: { status: 'blocked', ...base }, followUp: { eligibility: check.eligibility, conditions: check.conditions } });
+
+    const x = last.actualRequest;
+    const scope: ConfirmationScope = {
+      action: 'complete_stage',
+      target: { kind: 'eureka_stage', itemId: lt.itemId, stageId: lt.stageId },
+      exactChange: {
+        status: 'done',
+        approvalOperationId: approvalOp.operationId,
+        approvedSha,
+        reviewId: x['reviewId'] ?? approvalOp.actionResult.externalRefs.find((r) => r.kind === 'pull_request_review')?.id ?? '',
+        linkedRepository: `${prTarget.repository.owner}/${prTarget.repository.name}`,
+        linkedPrNumber: prTarget.prNumber,
+        priorStageStatus: check.evidence['stageStatus'],
+        stageName: check.evidence['stageName'] ?? x['stageName'],
+        followUpObservedAt: this.d.clock.nowIso(),
+        retryOf: last.operationId,
+      },
+    };
+    const view = await this.createQuestion(meta, 'confirmation', 'confirm_stage_completion', [], scope);
+    const conf = await this.d.store.getConfirmationForPending(view.pendingId);
+    const delivered = await this.d.store.markQuestionDelivered(view.pendingId, view.outputId, {
+      deliveredAt: this.d.clock.nowIso(),
+      channel: 'retry_request',
+      sourceMessageId: turn.turnId,
+      deliveredText: confirmationTokens(scope).join(' '),
+    });
+    if (!conf || !delivered) return this.processingFailure(meta.requestId, 'CONFIRMATION_INVALID', 'retry consent could not be recorded');
+    const commit = await this.d.store.atomicCommitAnswerAndClaim({
+      pendingId: view.pendingId,
+      expectedPendingRevision: delivered.revision,
+      requestId: meta.requestId,
+      conversationId: meta.conversationId,
+      answerTurnId: turn.turnId,
+      answeredAtMs: this.d.clock.nowMs(),
+      decision: {
+        kind: 'confirmation',
+        confirmationId: conf.confirmationId,
+        verdict: 'approved',
+        evidence: {
+          inputChannel: turn.inputChannel,
+          sttConfidenceState: turn.sttConfidenceState,
+          ...(turn.sttConfidence !== undefined ? { sttConfidence: turn.sttConfidence } : {}),
+          routeOverallConfidence: turn.routeDecision.overallConfidence,
+        },
+        rawText: turn.rawText,
+        rationale: `retry request treated as consent (D-23), retryOf=${last.operationId}`,
+        prepare: this.prepareFromScope(meta, conf),
+      },
+    });
+    if (!commit.ok) return this.answerRejected(meta, commit.reason, commit.pending);
+    meta.stateRevision += 1;
+    const prepared = commit.prepared;
+    if (!prepared || !prepared.ok) {
+      const reason = prepared && !prepared.ok ? prepared.reason : 'prepare_missing';
+      return this.result(meta, 'failed', [], {}, { errors: [errorInfo('harness.prepare', reason === 'capacity_exhausted' ? 'STORAGE_RESERVATION_FAILED' : 'CONFIRMATION_INVALID', reason, 'none')] });
+    }
+    const r = await this.stageCompletionWithWait(meta, prepared.operation, prepared.authority, constraints);
+    return { ...r, facts: { ...r.facts, retry: { status: 'started', retryOf: last.operationId } } };
   }
 
   // ============================================================ pipeline events
@@ -818,7 +1034,17 @@ export class HarnessService {
         isWrite: true,
         expectedOutcome: expectedOutcomeFor('submit_approval', s.target, { headSha: s.headSha! }),
         checkRuleVersion: this.cfg.checkRuleVersion,
-        actualRequest: { repository: s.target.repository, prNumber: s.target.prNumber, commitId: s.headSha, event: 'APPROVE', conversationId: meta.conversationId },
+        actualRequest: {
+          repository: s.target.repository,
+          prNumber: s.target.prNumber,
+          commitId: s.headSha,
+          event: 'APPROVE',
+          conversationId: meta.conversationId,
+          // 재시작·복구 뒤 Eureka 후속 질문을 만들 때 쓴다 (D-24)
+          contextId: meta.contextId,
+          contextVersion: meta.contextVersion,
+          ...linkedStageOf(meta.taskRefs, s.target),
+        },
         priorEvidence: {},
         holderId: this.holderId,
       };
@@ -1005,7 +1231,7 @@ export class HarnessService {
   /** 답변을 기다리지 않는 요청은 메모리에서 지운다. 결과는 turn 기록·operation 기록에 남아 있다 */
   private settle(result: HarnessResult) {
     const m = this.requests.get(result.requestId);
-    if (!m) return;
+    if (!m || m.backgroundRunning) return;
     if (result.disposition === 'awaiting_user') m.touchedAtMs = this.d.clock.nowMs();
     else if (!m.eventGap) this.requests.delete(result.requestId);
   }
@@ -1058,6 +1284,15 @@ export class HarnessService {
 }
 
 // ==================================================================== utils
+/** 승인 대상 PR과 연결된 Eureka 단계 (taskRefs). 복구 뒤 후속 질문에 쓰려고 operation에 남긴다 */
+function linkedStageOf(refs: TaskRef[], t: GitHubPrTarget): { linkedStage?: TaskRef } {
+  const ref = refs.find((r) => r.stageId && r.prNumber === t.prNumber && r.repository?.owner === t.repository.owner && r.repository?.name === t.repository.name);
+  return ref ? { linkedStage: ref } : {};
+}
+
+/** 실패한 Eureka 반영 다시 하기 의도 (라우터 intention, D-23). 값은 잠정 */
+const RETRY_INTENTS: ReadonlySet<string> = new Set(['eureka.retry', 'followup.retry']);
+
 function intentOf(turn: CurrentTurnInput): string {
   const v = turn.routeDecision.headOutputs['intention']?.value;
   return typeof v === 'string' ? v : 'unknown';

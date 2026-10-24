@@ -117,10 +117,36 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
       parts.push('쓰기가 꺼져 있어서 Eureka 반영 요청은 보내지 않았어요.');
       display.push('Eureka 쓰기 비활성');
     } else {
-      parts.push(`Eureka 반영은 하지 못했어요. GitHub 승인은 그대로 유지돼요.`);
+      const policyBlocked = stage.dispatchState === 'not_sent' && stage.error?.provisionalCode !== undefined && ['POLICY_BLOCKED', 'SHA_CHANGED'].includes(stage.error.provisionalCode);
+      parts.push(`Eureka 반영은 하지 못했어요. GitHub 승인은 그대로 유지돼요.${policyBlocked ? '' : " 'Eureka 다시 반영해줘'라고 하시면 다시 시도할게요."}`);
       display.push(`Eureka 반영 ${statusKo(stage.status)}`);
       emotion = 'apologetic';
     }
+  } else {
+    // 잠깐 기다리는 동안 끝나지 않음 (D-23): 끝나면 알림으로 다시 말한다
+    const sc = f['stageCompletion'] as { status?: string; stageName?: string } | undefined;
+    if (sc?.status === 'in_progress') {
+      parts.push(`Eureka의 '${sc.stageName ?? '해당'}' 단계 반영을 진행하고 있어요. 끝나면 알려 드릴게요.`);
+      display.push('Eureka 반영 진행 중');
+    }
+  }
+
+  // ---------------------------------------------------------------- 다시 하기 (D-23)
+  const retry = f['retry'] as { status: string; stageName?: string; reasons?: string[] } | undefined;
+  if (retry && retry.status !== 'started') {
+    const name = retry.stageName ? `'${retry.stageName}' 단계` : 'Eureka 반영';
+    const msg: Record<string, [string, string]> = {
+      nothing_to_retry: ['다시 할 Eureka 반영 작업을 찾지 못했어요. 아무것도 실행하지 않았어요.', '다시 할 작업 없음'],
+      already_done: [`${name}은 이미 완료로 반영돼 있어요.`, '이미 반영됨'],
+      result_unknown: [`${name}은 결과를 확인하는 중이라 다시 보내지 않았어요. 확인되면 알려 드릴게요.`, '결과 확인 중 · 재전송 안 함'],
+      approval_not_confirmed: ['GitHub 승인이 확인되지 않아 Eureka 반영을 다시 하지 않았어요.', '승인 미확인 · 실행 없음'],
+      blocked: [`지금은 ${name}을 반영할 수 없는 상태라 다시 하지 않았어요.`, '반영 불가 · 실행 없음'],
+      input_blocked: ['요청을 정확히 듣지 못해 다시 하지 않았어요. 한 번 더 말해 주세요.', '입력 확인 불가 · 실행 없음'],
+    };
+    const m = msg[retry.status] ?? ['Eureka 반영을 다시 하지 않았어요.', '실행 없음'];
+    parts.push(m[0]);
+    display.push(m[1]);
+    emotion = retry.status === 'already_done' ? 'neutral' : 'concerned';
   }
 
   // ---------------------------------------------------------------- 거절·답변
