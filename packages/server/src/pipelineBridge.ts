@@ -111,8 +111,13 @@ export class PipelineBridge {
    * 성공하지 않은 작업은 다듬지 않고 기준 문장 그대로 돌려준다. 검사·실패 시 고정 문구 규칙은 OutputService와 같다.
    */
   async generate(o: PipelineOutputRequest): Promise<string> {
+    return (await this.generateDetailed(o)).text;
+  }
+
+  /** generate와 같고 출력 모델 호출 시간(modelMs)도 돌려준다 (NFR-01, D-26) */
+  async generateDetailed(o: PipelineOutputRequest): Promise<{ text: string; modelMs?: number }> {
     const st = o.action?.status;
-    if (st && st !== 'succeeded' && st !== 'needs_clarification') return o.requiredText;
+    if (st && st !== 'succeeded' && st !== 'needs_clarification') return { text: o.requiredText };
     const reminder = ReminderPayload.safeParse(o.reminder);
     const tokens = (o.action?.facts[K.requiredMeaning] ?? '').split('\n').filter(Boolean);
     const pendingId = o.action?.facts[K.pendingId];
@@ -130,7 +135,8 @@ export class PipelineBridge {
       ...(isQuestion ? { pendingId } : {}),
       ...(reminder.success ? { reminder: reminder.data } : {}),
     };
-    return (await this.d.output.generate(req)).text;
+    const c = await this.d.output.generate(req);
+    return { text: c.text, ...(c.modelMs !== undefined ? { modelMs: c.modelMs } : {}) };
   }
 
   // ============================================================= mapping
@@ -178,6 +184,8 @@ export class PipelineBridge {
     // 팀 문서 발췌 (L-10 상한 안). 파이프라인은 output.generate에 이 facts를 그대로 넘긴다
     const wiki = (r.facts['wiki'] as { excerpts?: unknown[] } | undefined)?.excerpts;
     if (wiki?.length) facts['wikiExcerpts'] = JSON.stringify(wiki);
+    // 단계별 시간 (NFR-01, D-26): {"totalMs":…, "stages":[{stage, ms, ok}]}
+    if (r.facts['timings']) facts['timings'] = JSON.stringify(r.facts['timings']);
 
     const err = errorOf(r, primary, operationId);
     return {

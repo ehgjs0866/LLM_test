@@ -56,6 +56,8 @@ export class OutputService {
       return { ...fb, actionStatuses: statuses, validationResult: { passed: true, failures: [] }, fallbackUsed: true };
     }
     if (this.o.model) {
+      const t0 = Date.now();
+      const ms = () => ({ modelMs: Date.now() - t0 });
       try {
         const draft = await withTimeout(
           this.o.model.generate({
@@ -71,11 +73,11 @@ export class OutputService {
         // 모델이 화면 문장을 냈으면 그것도 같은 기준으로 검사한다. 내지 않았으면 고정 화면 문장을 쓴다
         const failures = this.validate({ text: draft.text, ...(draft.displayText !== undefined ? { displayText: draft.displayText } : {}) }, req);
         if (failures.length === 0) {
-          return { outputId: req.outputId, text: draft.text, displayText: draft.displayText ?? fb.displayText, emotion, actionStatuses: statuses, validationResult: { passed: true, failures: [] }, fallbackUsed: false };
+          return { outputId: req.outputId, text: draft.text, displayText: draft.displayText ?? fb.displayText, emotion, actionStatuses: statuses, validationResult: { passed: true, failures: [] }, fallbackUsed: false, ...ms() };
         }
-        return { ...fb, actionStatuses: statuses, validationResult: { passed: false, failures }, fallbackUsed: true };
+        return { ...fb, actionStatuses: statuses, validationResult: { passed: false, failures }, fallbackUsed: true, ...ms() };
       } catch (e) {
-        return { ...fb, actionStatuses: statuses, validationResult: { passed: false, failures: [`model_error:${e instanceof Error ? e.message : 'unknown'}`] }, fallbackUsed: true };
+        return { ...fb, actionStatuses: statuses, validationResult: { passed: false, failures: [`model_error:${e instanceof Error ? e.message : 'unknown'}`] }, fallbackUsed: true, ...ms() };
       }
     }
     return { ...fb, actionStatuses: statuses, validationResult: { passed: true, failures: [] }, fallbackUsed: true };

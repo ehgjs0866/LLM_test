@@ -16,3 +16,4 @@ export * from './ports.js';
 export * from './HarnessService.js';
 export * from './wiki/FileWikiReader.js';
 export * from './recovery/RecoveryWorker.js';
+export * from './runtime/timing.js';

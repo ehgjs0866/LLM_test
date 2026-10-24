@@ -54,7 +54,7 @@ export class DirectHarnessInbound implements HarnessInbound {
         return { kind: 'action.result', payload: await this.d.bridge.reconcile(env.payload as Envelope<'harness.reconcile'>['payload']) };
       case 'output.generate':
         if (!this.d.bridge) throw new UnsupportedKindError(env.kind);
-        return { kind: 'output.text', payload: { text: await this.d.bridge.generate(env.payload as Envelope<'output.generate'>['payload']) } };
+        return { kind: 'output.text', payload: await this.d.bridge.generateDetailed(env.payload as Envelope<'output.generate'>['payload']) };
       case 'eureka.execute':
         if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
         return { kind: 'action.result', payload: await this.d.eurekaBridge.execute(env.payload as Envelope<'eureka.execute'>['payload']) };

@@ -45,6 +45,7 @@ import { expectedOutcomeFor } from './policy/expectedOutcome.js';
 import { classifyAnswer, writeInputBlockers } from './policy/inputPolicy.js';
 import type { WikiReader } from './ports.js';
 import type { Clock, IdGen } from './runtime/clock.js';
+import { collectTimings, timedPort } from './runtime/timing.js';
 import { DeterministicSensor, type Sensor } from './sensor/Sensor.js';
 import type { OperationStore, PrepareCommand } from './store/OperationStore.js';
 
@@ -118,7 +119,18 @@ export class HarnessService {
   private readonly background = new Set<Promise<unknown>>();
   private noticeSeq = 0;
 
-  constructor(private readonly d: HarnessDeps) {
+  private readonly d: HarnessDeps;
+
+  constructor(deps: HarnessDeps) {
+    // 외부 호출 시간 기록 (NFR-01, D-26): port 경계에서 잰다
+    const d: HarnessDeps = {
+      ...deps,
+      github: timedPort(deps.github, 'github'),
+      eureka: timedPort(deps.eureka, 'eureka'),
+      ...(deps.wiki ? { wiki: timedPort(deps.wiki, 'wiki') } : {}),
+      ...(deps.llm ? { llm: timedPort(deps.llm, 'llm', { complete: 'llm.guide' }) } : {}),
+    };
+    this.d = d;
     this.cfg = d.config ?? DEFAULT_POLICY;
     this.guide = d.guide ?? new RuleFirstGuide(new RuleBasedGuide(this.cfg), d.llm ? new LlmGuide(d.llm, { now: () => d.clock.nowMs(), timeoutMs: this.cfg.llmGuideTimeoutMs }) : undefined);
     this.sensor = d.sensor ?? new DeterministicSensor();
@@ -135,7 +147,7 @@ export class HarnessService {
     if (dup) return dup; // 동일 turnId 재전달은 저장된 결과로 응답
 
     const meta = this.meta(req.requestId, req.currentTurn, req.context, req.constraints.deadlineAt, intentOf(req.currentTurn));
-    const result = RETRY_INTENTS.has(meta.intent) ? await this.retryStageCompletion(meta, req.currentTurn, req.context, req.constraints) : await this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints);
+    const result = await this.withTimings(() => (RETRY_INTENTS.has(meta.intent) ? this.retryStageCompletion(meta, req.currentTurn, req.context, req.constraints) : this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints)));
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
     this.settle(result);
     return result;
@@ -149,7 +161,7 @@ export class HarnessService {
     const dup = await this.d.store.getTurnResult(req.currentTurn.turnId);
     if (dup) return dup;
 
-    const result = await this.resumeInner(req);
+    const result = await this.withTimings(() => this.resumeInner(req));
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
     this.settle(result);
     return result;
@@ -280,6 +292,12 @@ export class HarnessService {
     return this.result(meta, 'completed', [], {
       stageCompletion: { status: 'in_progress', operationId: op.operationId, itemId: t.itemId, stageId: t.stageId, stageName: op.actualRequest['stageName'] },
     });
+  }
+
+  /** 이번 호출에서 외부 호출이 걸린 시간을 facts.timings에 붙인다 (NFR-01, D-26) */
+  private async withTimings(fn: () => Promise<HarnessResult>): Promise<HarnessResult> {
+    const { value, timings, totalMs } = await collectTimings(fn);
+    return { ...value, facts: { ...value.facts, timings: { totalMs, stages: timings } } };
   }
 
   /** 응답 뒤에도 진행 중인 후속 작업이 끝날 때까지 기다린다 (서버 종료·테스트용) */

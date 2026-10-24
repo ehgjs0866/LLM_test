@@ -6,16 +6,22 @@
  *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 승인은 요청 쪽(사용자 확인 질문·답변)에서만 받는다 (D-22).
  *                                         # DESKPET_STORE_PATH(영속 저장소) 필수. 같은 DB는 한 프로세스만 연다 (<DB>.lock)
  *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발 환경 flw-d1만). 영속 저장소 필수
+ *   pnpm harness … --poc                  # POC 장애 주입 (DESKPET_POC_FAULTS, scripts/poc-faults.ts, D-27)
  *
  * .env
  *   HARNESS_WS_TOKEN (필수, 16자 이상 — 클라이언트 hello 인증), HARNESS_WS_HOST(기본 127.0.0.1), HARNESS_WS_PORT(기본 8787),
  *   HARNESS_WS_ALLOWED_ORIGINS (브라우저 Origin 허용 목록, 쉼표 구분. 비우면 브라우저 접속 거부)
+ *   HARNESS_WS_ALLOWED_CLIENTS (다른 기기 접속 허용 IP·CIDR, 쉼표 구분. HARNESS_WS_HOST를 loopback이 아닌 값으로 줄 때 필수)
+ *   HARNESS_WS_TLS_CERT / HARNESS_WS_TLS_KEY (선택, PEM 파일 경로 → wss://)
  *   HARNESS_WS_VIEWER_TOKEN (선택, 16자 이상 — 웹 화면용 구독 전용 토큰. pipeline 토큰과 달라야 함)
  *   GITHUB_TOKEN, EUREKA_API_KEY, EUREKA_BASE_URL, DESKPET_REQUIRED_CHECKS, DESKPET_STORE_PATH, LLM_* (기존과 같음)
  * 비밀값은 출력하지 않는다. 쓰기는 옵션을 준 경우에만 보낸다. 서버 콘솔 yes 확인은 없앴다 (사용자 결정 2026-10-24, D-22).
  */
+import { readFileSync } from 'node:fs';
+import { pocSetup } from './poc-faults.js';
+import { networkInterfaces } from 'node:os';
 import { createEurekaRestGateway, GitHubReviewGateway, parseRequiredChecksFallback, RestGitHubTransport } from '@deskpet/gateways';
-import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, RecoveryWorker, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
+import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, RecoveryWorker, summarizeTimings, type TimingEntry, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
 import { createLlmFromEnv } from '@deskpet/llm';
 import { OutputService, fallbackText, mapHarnessResult } from '@deskpet/output';
 import { ConcurrencyLimiter, type FollowUpNotice } from '@deskpet/contracts';
@@ -37,6 +43,29 @@ const fail = (msg: string): never => {
 const token = env['HARNESS_WS_TOKEN']?.trim() || fail('HARNESS_WS_TOKEN이 비어 있어요 (16자 이상 임의 문자열)');
 if (token.length < 16) fail('HARNESS_WS_TOKEN은 16자 이상이어야 해요');
 const githubToken = env['GITHUB_TOKEN'] || fail('GITHUB_TOKEN이 비어 있어요');
+
+// ------------------------------------------------------ 다른 기기 접속 (D-25)
+// 기본은 이 기기에서만(127.0.0.1). Jetson·파이프라인 보드에서 붙으려면 HARNESS_WS_HOST=0.0.0.0(또는 이 기기의 LAN 주소)과
+// HARNESS_WS_ALLOWED_CLIENTS(접속을 받을 IP·CIDR)를 함께 준다. 둘 중 하나만 있으면 시작하지 않는다.
+const wsHost = env['HARNESS_WS_HOST']?.trim() || '127.0.0.1';
+const lan = !['127.0.0.1', 'localhost', '::1'].includes(wsHost);
+const allowedClients = (env['HARNESS_WS_ALLOWED_CLIENTS'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+const tlsCert = env['HARNESS_WS_TLS_CERT']?.trim();
+const tlsKey = env['HARNESS_WS_TLS_KEY']?.trim();
+if (lan) {
+  if (!allowedClients.length) fail(`HARNESS_WS_HOST=${wsHost}로 다른 기기 접속을 열려면 HARNESS_WS_ALLOWED_CLIENTS(예: 192.168.0.20 또는 192.168.0.0/24)가 필요해요`);
+  if (token.length < 24) fail('다른 기기 접속을 열 때는 HARNESS_WS_TOKEN을 24자 이상으로 해 주세요');
+  const vt = env['HARNESS_WS_VIEWER_TOKEN']?.trim();
+  if (vt && vt.length < 24) fail('다른 기기 접속을 열 때는 HARNESS_WS_VIEWER_TOKEN도 24자 이상으로 해 주세요');
+}
+if (!!tlsCert !== !!tlsKey) fail('TLS를 쓰려면 HARNESS_WS_TLS_CERT와 HARNESS_WS_TLS_KEY를 둘 다 주세요 (PEM 파일 경로)');
+const tls = tlsCert && tlsKey ? (() => {
+  try {
+    return { cert: readFileSync(tlsCert, 'utf8'), key: readFileSync(tlsKey, 'utf8') };
+  } catch (e) {
+    return fail(`TLS 인증서·키를 읽지 못했어요: ${e instanceof Error ? e.message : String(e)}`);
+  }
+})() : undefined;
 
 // ------------------------------------------------------------------ wiring
 // LLM Guide 호출 시간 상한은 .env LLM_GUIDE_TIMEOUT_MS로 바꿀 수 있다 (기본 8초)
@@ -70,19 +99,27 @@ const store = openStore();
 // 자원별 동시 호출 상한 (D-24). 자리가 없으면 그 호출의 남은 시간 안에서 기다리고, 그래도 없으면 보내지 않음(not_sent)
 const githubLimiter = new ConcurrencyLimiter('github', positive(env['GITHUB_MAX_CONCURRENT'], 4));
 const eurekaLimiter = new ConcurrencyLimiter('eureka', positive(env['EUREKA_MAX_CONCURRENT'], 4));
+// POC 장애 주입 (D-27): --poc 플래그 + DESKPET_POC_FAULTS + flw-d1일 때만 (scripts/poc-faults.ts)
+const poc = (() => {
+  try {
+    return pocSetup(env, process.argv, (l) => console.log(l));
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+})();
 const github = new GitHubReviewGateway({
-  transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites, limiter: githubLimiter }),
+  transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites, limiter: githubLimiter, ...(poc.githubFetch ? { fetchImpl: poc.githubFetch } : {}) }),
   now: () => Date.now(),
   requiredChecksFallback: parseRequiredChecksFallback(env['DESKPET_REQUIRED_CHECKS']),
 });
-const eureka = createEurekaRestGateway(env, undefined, { allowWrites: allowEurekaWrites, limiter: eurekaLimiter });
+const eureka = createEurekaRestGateway(env, poc.eurekaFetch, { allowWrites: allowEurekaWrites, limiter: eurekaLimiter });
 const llm = createLlmFromEnv(env);
 // LLM Wiki (D-19): vault 루트 경로. 없으면 Wiki 검색을 하지 않는다
 const wikiDir = env['DESKPET_WIKI_DIR']?.trim();
 const wiki = wikiDir ? new FileWikiReader({ root: wikiDir }) : undefined;
 // 요청이 끝난 뒤 확정된 결과(늦게 끝난 Eureka 반영, 주기 복구)는 pipeline 연결에 notice로 알린다 (D-23)
 let notify: (n: FollowUpNotice) => void = () => undefined;
-const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}), ...(wiki ? { wiki } : {}), onFollowUp: (n) => notify(n) });
+const harness = new HarnessService({ store, github, eureka, clock: systemClock, ids: randomIdGen, config, holderId: `server-${process.pid}`, ...(llm.guideClient ? { llm: llm.guideClient } : {}), ...(wiki ? { wiki } : {}), ...(poc.sensor ? { sensor: poc.sensor } : {}), onFollowUp: (n) => notify(n) });
 // 결과 불명·판정 대기 작업 주기 확인. 다시 보내지 않고 조회만 한다 (D-23). RECOVERY_INTERVAL_MS(기본 30초)
 const recovery = new RecoveryWorker({ harness, store, clock: systemClock, intervalMs: Number(env['RECOVERY_INTERVAL_MS']) || 30_000, log: (l) => console.log(`[recovery] ${l}`) });
 const output = new OutputService(llm.outputModel ? { model: llm.outputModel, ...(llm.outputTimeoutMs ? { modelTimeoutMs: llm.outputTimeoutMs } : {}) } : {});
@@ -99,10 +136,14 @@ const server = new HarnessWsServer({
   store,
   token,
   ...(env['HARNESS_WS_VIEWER_TOKEN']?.trim() ? { viewerToken: env['HARNESS_WS_VIEWER_TOKEN'].trim() } : {}),
-  host: env['HARNESS_WS_HOST']?.trim() || '127.0.0.1',
+  host: wsHost,
+  allowedClients,
+  ...(tls ? { tls } : {}),
   port: Number(env['HARNESS_WS_PORT']) || 8787,
   allowedOrigins: (env['HARNESS_WS_ALLOWED_ORIGINS'] ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   log: (l) => console.log(`[server] ${l}`),
+  // 단계별 처리 시간 (NFR-01, D-26). DESKPET_TIMING_LOG=off면 끈다
+  ...(env['DESKPET_TIMING_LOG']?.trim() === 'off' ? {} : { onCompleted: (i: { kind: string; requestId: string; ms: number; ok: boolean; payload?: unknown }) => console.log(`[timing] ${i.kind} ${i.requestId} ${i.ms}ms${i.ok ? '' : ' (거부·오류)'}${timingDetail(i.payload)}`) }),
 });
 notify = (n) => {
   const text = fallbackText(mapHarnessResult(n.result)).text;
@@ -118,9 +159,16 @@ notify = (n) => {
 
 async function main() {
   console.log('DeskPet Harness 서버');
+  for (const l of poc.banner) console.log(l);
   console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (사용자 확인 답변만으로 보냄)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (사용자 확인 답변만으로 보냄)` : '꺼짐'}`);
   console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model} (동시 ${llm.limiter?.stats().max ?? '-'}건)` : `LLM 꺼짐 (${llm.reason})`);
   console.log(`동시 호출 상한: GitHub ${githubLimiter.stats().max} / Eureka ${eurekaLimiter.stats().max} (D-24)`);
+  if (lan) {
+    const scheme = tls ? 'wss' : 'ws';
+    const addrs = Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => `${scheme}://${i!.address}:${Number(env['HARNESS_WS_PORT']) || 8787}`);
+    console.log(`다른 기기 접속: 허용 ${allowedClients.join(', ')} → 이 기기 주소 ${addrs.join(', ') || '(찾지 못함)'}`);
+    if (!tls) console.log('  ! TLS 없이 열었어요: 토큰이 네트워크에 암호화 없이 오갑니다. 믿을 수 있는 같은 네트워크(집·연구실)에서만 쓰세요.');
+  } else console.log('다른 기기 접속: 꺼짐 (이 기기에서만)');
   // 웹 화면 연결 준비 상태 (값은 출력하지 않는다)
   const origins = (env['HARNESS_WS_ALLOWED_ORIGINS'] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   console.log(
@@ -168,4 +216,22 @@ main().catch((e: unknown) => {
 function positive(v: string | undefined, d: number): number {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : d;
+}
+
+/** 응답 payload 안의 단계별 시간을 한 줄로 (HarnessResult.facts.timings, 파이프라인 형식 facts.timings, 출력 modelMs) */
+function timingDetail(p: unknown): string {
+  const o = p as { facts?: Record<string, unknown>; action?: { facts?: Record<string, string> }; modelMs?: number } | undefined;
+  if (!o) return '';
+  let t = o.facts?.['timings'] as { stages?: TimingEntry[] } | undefined;
+  if (!t && o.action?.facts?.['timings']) {
+    try {
+      t = JSON.parse(o.action.facts['timings']) as { stages?: TimingEntry[] };
+    } catch {
+      t = undefined;
+    }
+  }
+  const parts: string[] = [];
+  if (t?.stages?.length) parts.push(summarizeTimings(t.stages));
+  if (typeof o.modelMs === 'number') parts.push(`llm.output ${o.modelMs}ms`);
+  return parts.length ? ` — ${parts.join(', ')}` : '';
 }

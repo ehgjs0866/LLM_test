@@ -1,5 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import type { IncomingMessage } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { clampPayloadDeadline, parseEnvelope, SUPPORTED_MAJOR, type Envelope } from '@deskpet/contracts';
 import type { OperationStore, StoreChange } from '@deskpet/harness';
@@ -32,6 +34,13 @@ export interface HarnessWsServerOptions {
   host?: string;
   port?: number;
   allowedOrigins?: string[];
+  /**
+   * 접속을 받을 클라이언트 IP (D-25). IPv4 주소 또는 CIDR(예: 192.168.0.0/24). 이 기기 자신(loopback)은 항상 허용.
+   * 비우면 loopback만 받는다. 다른 기기(Jetson·파이프라인 보드)에서 붙으려면 그 주소를 넣는다
+   */
+  allowedClients?: string[];
+  /** wss(TLS) 인증서·키 (PEM 문자열). 주면 wss://로 연다 (D-25) */
+  tls?: { cert: string; key: string };
   maxPayloadBytes?: number;
   maxInFlightPerConnection?: number;
   maxBufferedBytes?: number;
@@ -51,6 +60,8 @@ export interface HarnessWsServerOptions {
   maxPendingEvents?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** 요청 하나를 끝낼 때마다 (처리 시간 기록용, NFR-01) */
+  onCompleted?: (info: { kind: string; requestId: string; ms: number; ok: boolean; payload?: unknown }) => void;
 }
 
 export type Lane = 'work' | 'eureka' | 'control';
@@ -79,6 +90,7 @@ interface CachedReply {
 
 export class HarnessWsServer {
   private wss?: WebSocketServer;
+  private https?: HttpsServer;
   private readonly conns = new Set<Conn>();
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly laneInFlight: Record<Lane, number> = { work: 0, eureka: 0, control: 0 };
@@ -105,27 +117,39 @@ export class HarnessWsServer {
   async start(): Promise<{ host: string; port: number }> {
     const host = this.o.host ?? '127.0.0.1';
     const allowed = new Set(this.o.allowedOrigins ?? []);
-    this.wss = new WebSocketServer({
-      host,
-      port: this.o.port ?? 8787,
-      maxPayload: this.o.maxPayloadBytes ?? 256 * 1024,
-      verifyClient: (info, done) => {
-        const origin = info.origin;
-        if (origin && !allowed.has(origin)) {
-          this.log(`거부: 허용되지 않은 Origin ${origin}`);
-          return done(false, 403, 'origin not allowed');
-        }
-        done(true);
-      },
-    });
+    const clients = parseClientRules(this.o.allowedClients ?? []);
+    const verifyClient = (info: { origin: string; req: IncomingMessage }, done: (ok: boolean, code?: number, msg?: string) => void) => {
+      const ip = normalizeIp(info.req.socket.remoteAddress ?? '');
+      if (!isLoopback(ip) && !clients.some((r) => r(ip))) {
+        this.log(`거부: 허용되지 않은 클라이언트 주소 ${ip || '(알 수 없음)'}`);
+        return done(false, 403, 'client address not allowed');
+      }
+      const origin = info.origin;
+      if (origin && !allowed.has(origin)) {
+        this.log(`거부: 허용되지 않은 Origin ${origin}`);
+        return done(false, 403, 'origin not allowed');
+      }
+      done(true);
+    };
+    const common = { maxPayload: this.o.maxPayloadBytes ?? 256 * 1024, verifyClient };
+    if (this.o.tls) {
+      this.https = createHttpsServer({ cert: this.o.tls.cert, key: this.o.tls.key });
+      this.wss = new WebSocketServer({ ...common, server: this.https });
+      await new Promise<void>((resolve, reject) => {
+        this.https!.once('error', reject);
+        this.https!.listen(this.o.port ?? 8787, host, () => resolve());
+      });
+    } else {
+      this.wss = new WebSocketServer({ ...common, host, port: this.o.port ?? 8787 });
+      await new Promise<void>((resolve, reject) => {
+        this.wss!.once('listening', resolve);
+        this.wss!.once('error', reject);
+      });
+    }
     this.wss.on('connection', (ws) => this.onConnection(ws));
     this.unsubscribe = this.o.store.subscribe((c) => this.broadcast(c));
-    await new Promise<void>((resolve, reject) => {
-      this.wss!.once('listening', resolve);
-      this.wss!.once('error', reject);
-    });
-    const addr = this.wss.address() as AddressInfo;
-    this.log(`Harness WebSocket 서버 ws://${host}:${addr.port} (protocol ${PROTOCOL}, epoch ${this.epoch})`);
+    const addr = (this.https ? this.https.address() : this.wss.address()) as AddressInfo;
+    this.log(`Harness WebSocket 서버 ${this.o.tls ? 'wss' : 'ws'}://${host}:${addr.port} (protocol ${PROTOCOL}, epoch ${this.epoch})`);
     return { host, port: addr.port };
   }
 
@@ -139,6 +163,7 @@ export class HarnessWsServer {
     await Promise.race([drained, new Promise((r) => setTimeout(r, drainMs))]);
     for (const c of this.conns) c.ws.close(CLOSE.shuttingDown, 'server shutting down');
     await new Promise<void>((resolve) => wss.close(() => resolve()));
+    if (this.https) await new Promise<void>((resolve) => this.https!.close(() => resolve()));
     this.log('Harness WebSocket 서버 종료');
   }
 
@@ -249,7 +274,15 @@ export class HarnessWsServer {
 
     if (lane !== 'control') conn.inFlight += 1;
     this.laneInFlight[lane] += 1;
+    const started = Date.now();
     const reply = this.execute(clampPayloadDeadline(env));
+    void reply.then((f) => {
+      try {
+        this.o.onCompleted?.({ kind: env.kind, requestId: env.requestId, ms: Date.now() - started, ok: f.type === 'reply' && f.ok, ...(f.type === 'reply' && f.ok ? { payload: f.payload } : {}) });
+      } catch {
+        // 기록 실패는 응답에 영향을 주지 않는다
+      }
+    });
     this.remember(env.messageId, { fingerprint, reply });
     this.inFlight.add(reply);
     try {
@@ -353,4 +386,42 @@ function fingerprintOf(env: Envelope): string {
 function peekIds(raw: unknown): { messageId: string | null; requestId: string | null } {
   const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   return { messageId: typeof r['messageId'] === 'string' ? r['messageId'] : null, requestId: typeof r['requestId'] === 'string' ? r['requestId'] : null };
+}
+
+// ------------------------------------------------------------ 접속 주소 (D-25)
+export function normalizeIp(ip: string): string {
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+
+function isLoopback(ip: string): boolean {
+  return ip === '::1' || ip.startsWith('127.');
+}
+
+function ipv4ToInt(ip: string): number | undefined {
+  const p = ip.split('.');
+  if (p.length !== 4) return undefined;
+  let n = 0;
+  for (const x of p) {
+    if (!/^\d{1,3}$/.test(x) || Number(x) > 255) return undefined;
+    n = n * 256 + Number(x);
+  }
+  return n;
+}
+
+/** "192.168.0.10", "192.168.0.0/24" → 검사 함수. IPv6는 정확히 같은 주소만 */
+export function parseClientRules(rules: string[]): ((ip: string) => boolean)[] {
+  return rules.flatMap((raw) => {
+    const r = raw.trim();
+    if (!r) return [];
+    const [addr, bitsS] = r.split('/');
+    const base = ipv4ToInt(addr!);
+    if (base === undefined) return [(ip: string) => ip === r];
+    const bits = bitsS === undefined ? 32 : Number(bitsS);
+    if (!Number.isInteger(bits) || bits < 0 || bits > 32) throw new Error(`invalid client rule: ${r}`);
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    return [(ip: string) => {
+      const n = ipv4ToInt(ip);
+      return n !== undefined && ((n & mask) >>> 0) === ((base & mask) >>> 0);
+    }];
+  });
 }

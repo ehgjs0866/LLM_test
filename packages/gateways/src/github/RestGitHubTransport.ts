@@ -18,7 +18,7 @@ import {
  *
  * inference / 미정
  * - 파일 목록 API는 SHA를 돌려주지 않으므로 changes section의 버전 근거를 만들지 않는다(unverified).
- * - 리뷰 상세 코멘트(pulls/{n}/comments)는 아직 조회하지 않는다.
+ * - 리뷰 상세 코멘트(pulls/{n}/comments)는 review_comments로 조회한다. Copilot 작성자 판별 login은 추정값이다 (GitHubReviewGateway).
  * - 필수 검사는 rulesets + classic branch protection을 본다. 조회 실패는 이유(plan_unsupported 등)와 함께 반환한다.
  */
 export interface RestGitHubTransportOptions {

@@ -67,6 +67,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | `pnpm demo [PR] [--answer "…"] [--ask "…" --intent …]` | 데모 클라이언트 (서버가 켜져 있어야 함) |
 | `pnpm db [ops\|op <id>\|pending\|dedup\|turns\|raw …]` | 저장소 조회 (읽기 전용, 기록을 바꾸지 않음) |
 | `pnpm web:dev` / `pnpm web:build` | 웹 화면 개발 서버 / 빌드 |
+| `pnpm web:dev:lan` | 웹 화면을 다른 기기 브라우저에서 열 때 (Vite를 0.0.0.0으로, D-25) |
 | `pnpm web:fixture` | 실제 API 없이 여러 상태를 만든 fixture 서버 (웹 화면 확인용) |
 
 `pnpm server`, `pnpm store`는 pnpm 자체 명령과 이름이 겹쳐 쓰지 않는다.
@@ -138,6 +139,9 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | D-17 | 웹 화면은 보기 전용. 서버의 viewer 전용 토큰으로만 접속하고 변경 기능은 없다 (`docs/web-ui.md`) | 구현 |
 | D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-05, 2026-10-24 갱신 |
 | D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발 환경(flw-d1)에서만**. 영속 저장소 필수. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-12 (실제 시험 허락) |
+| D-27 | POC 장애 주입: `--poc` + `DESKPET_POC_FAULTS` + flw-d1일 때만. `eureka_stage_slow`, `eureka_stage_fail_once`, `github_approve_drop_once`, `sensor_fail_once`. 운영 코드가 아닌 `scripts/poc-faults.ts`에서 fetch·센서를 감싼다. 시나리오는 `docs/poc-d21-d27.md` | 구현 2026-10-24 |
+| D-26 | 단계별 응답 시간 기록 (NFR-01): 외부 호출(GitHub·Eureka·LLM Guide·Wiki)을 port 경계에서 재어 `HarnessResult.facts.timings` `{totalMs, stages:[{stage, ms, ok}]}`에 담는다. 파이프라인 형식은 `facts.timings`(JSON 문자열), 출력 모델은 `modelMs`. 서버 콘솔에 요청마다 `[timing]` 한 줄 (`DESKPET_TIMING_LOG=off`로 끔) | 구현 2026-10-24 |
+| D-25 | 다른 기기 접속: 기본은 이 기기에서만. `HARNESS_WS_HOST`를 열 때는 `HARNESS_WS_ALLOWED_CLIENTS`(IP·CIDR) 필수, 토큰 24자 이상, 선택 TLS(`wss://`). loopback은 항상 허용. 연결 단계에서 주소를 거부한다 (`docs/remote-access.md`) | 사용자 요청 2026-10-24 (Jetson 시험) |
 | D-24 | **자원별 동시 호출 상한**: LLM 2건(자리 대기 0.5초, 안 나면 호출 없이 규칙·고정 문구), GitHub·Eureka 각 4건(남은 시간 안에서 대기, 안 나면 `not_sent`). 서버 입구는 칸(work/eureka/control)으로 나누고 질문 전달 보고·취소·reconcile(control)은 다른 칸 상한과 별도. **복구 뒤 후속 질문**: 주기 복구로 GitHub 승인이 성공 확정되면 연결된 Eureka 단계 상태와 기록(note의 PR 주소)을 다시 보고 반영 가능할 때만 확인 질문을 notice에 실어 보낸다. 연결 단계·대화·문맥 ID는 승인 operation에 남겨 재시작 뒤에도 쓴다. 수치는 미정 | 사용자 결정 2026-10-24 |
 | D-23 | **후속 작업 분리**: ① Eureka 반영은 동의 뒤 최대 3초만 기다리고, 늦으면 '진행 중'으로 답한 뒤 끝난 결과를 서버 notice로 알린다 ② 서버 안의 `RecoveryWorker`가 결과 불명·판정 대기 작업을 주기적으로(기본 30초, 작업별 간격 2배씩 최대 10분) 조회만 하고, 확정되면 notice. 상한에 닿으면 `blocked` ③ 명시적으로 실패한 Eureka 반영은 "다시 해줘"(`eureka.retry`) 발화 자체를 동의로 보고 새 작업으로 다시 보낸다. 결과 불명은 다시 보내지 않는다 | 사용자 결정 2026-10-24 |
 | D-22 | 서버 콘솔 이중 확인(`yes`)을 없앤다. 쓰기 승인은 요청 쪽(파이프라인이 전달한 확인 질문과 사용자 답변, `mutationApproved`)에서만 받는다. 쓰기 옵션·flw-d1 제한·전송 직전 상태 재확인·DurableAck는 그대로. `ConsoleOperatorConfirm` 코드는 남겨 두되 서버에서 쓰지 않는다 | 사용자 결정 2026-10-24 (피드백 반영) |
@@ -209,6 +213,10 @@ S-02(다중 후보), S-03(Copilot 리뷰 없음·오래됨), S-12(쓰다듬기)�
 - PR 변경 내용(diff) 수집 범위와 상한 (지금은 파일·증감 줄 수만, `docs/audit-fixes.md`)
 
 ## 문서
+
+- `docs/pipeline-handoff.md` — 파이프라인 연결 안내 (한 장)
+- `docs/poc-d21-d27.md` — POC 시나리오와 기록 양식
+- `docs/remote-access.md` — 다른 기기 접속, Jetson 준비
 
 | 문서 | 내용 |
 | --- | --- |
