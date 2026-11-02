@@ -28,6 +28,7 @@
 | 15 | Eureka 확인 질문의 모델 화면 문장이 필수 문구 누락 | 관찰 | 고정 문구 사용, 규칙은 팀과 결정 |
 | 16 | Eureka에 PR 연결 필드 없음, 단계 기록은 웹 화면에 안 보임 | 우회 + 문의 | 단계 기록(note) API로 PR 주소 읽기, 화면 문제는 Eureka 담당자 문의 |
 | 17 | 실제 시험: 기록의 PR로 G-01, 같은 PR 재승인도 approved 기록 남음 (2026-10-24) | 확인 | `pnpm demo --item` 흐름 동작 |
+| 18 | 단계 기록 작성 API 확인 (웹 요청, 2026-11-01) | 구현, 실제 시험 전 | D-28. API 키 호출에서 actorId 필요 여부는 미확인 |
 
 ---
 
@@ -348,6 +349,13 @@ gh api repos/ehgjs0866/personal_MCP_test/commits/293300b/check-runs --jq ".check
 - 결정(D-21): 단계 기록에 `PR: https://github.com/<owner>/<repo>/pull/<번호>`를 남기고, `eureka.links`가 이를 읽어 대상 PR과 완료할 단계를 정한다.
 - 남은 문제: **Eureka 웹 화면에서 남긴 기록이 보이지 않는다** (API로는 저장·조회됨). 같은 기록이 두 번 저장된 것(1000017·1000018)도 화면에 안 보여 다시 누른 결과로 보임 → Eureka 담당자에게 문의.
 - 보류: 허용 저장소 목록, 작성자 제한(담당자 기록만), 기록 목록 페이지 넘김(지금 50건까지).
+
+## 18. 단계 기록 작성 API (2026-11-01)
+
+- 확인(웹 F12, 운영 flw-v1): `POST /_api_/stages/{stageId}/note`, 본문 `{content, actorId}` (actorId 형식 `1000011@10200`). 응답 `{id, createdAt, updatedAt, deletedAt:0, stereo:"comment", content, stageId, stage$, actorId, actor$, isResolved:false}`. 웹은 로그인 정보로 호출한다.
+- 구현(D-28): `EurekaGateway.addStageNote`, 완료 근거 기록. Fake 서버에도 같은 경로를 넣었다.
+- 아직 모름: ① 우리 API 키(`x-api-key`)로 호출해도 되는지 ② actorId 없이 보내면 되는지, 아니면 누구로 남는지 ③ 개발판(flw-d1)에서도 같은지. 실제 시험은 개발판 단계 하나에서 1회로 확인한다 (허락 후).
+- 참고: #16의 "기록이 웹 화면에 안 보임"이 작성자(actorId) 없이 만든 기록이라 그런지도 같이 확인한다 (추정).
 
 ## 참고: 의도한 동작 (문제 아님)
 

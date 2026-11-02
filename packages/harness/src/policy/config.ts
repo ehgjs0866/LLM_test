@@ -33,6 +33,16 @@ export interface PolicyConfig {
   llmGuideTimeoutMs: number;
   /** Eureka 반영 동의 뒤 결과를 기다리는 시간(ms). 넘으면 '진행 중'으로 답하고 끝나면 알림 (D-23). 미정 */
   followUpReplyWaitMs: number;
+  /**
+   * 단계 완료가 성공하면 단계 기록(note)에 승인한 PR 주소를 남긴다 (D-28). 동의는 단계 완료 확인 질문에 함께 받는다.
+   * 기본 false(라이브러리). 서버(scripts/server.ts)는 EUREKA_EVIDENCE_NOTE=off가 아니면 켠다
+   */
+  evidenceNote: boolean;
+  /**
+   * 라우터가 `llm`·`unclear` 같은 일반 의도로 보낸 요청을 LLM으로 한 번 더 보고 PR 리뷰·승인이면 규칙 경로로 보낸다 (D-29).
+   * 승인은 여전히 확인 질문을 거친다. 기본 false(라이브러리). 서버는 DESKPET_INTENT_RECHECK=off가 아니면 켠다
+   */
+  intentRecheck: boolean;
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -52,4 +62,6 @@ export const DEFAULT_POLICY: PolicyConfig = {
   githubToolTimeoutMs: 30_000,
   llmGuideTimeoutMs: 8_000,
   followUpReplyWaitMs: 3_000,
+  evidenceNote: false,
+  intentRecheck: false,
 };

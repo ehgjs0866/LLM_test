@@ -42,7 +42,8 @@ export class LlmGuide implements Guide {
       ...base,
       kind: 'blocked',
       reasonRefs: [...base.reasonRefs, why],
-      payload: { unmetConditions: [`unsupported_intent:${intent}`], unknownEvidence: [], requiredUserOrSystemAction: 'none' },
+      // 막힌 진짜 이유(why)도 함께 남긴다 (예: llm:unsupported, no_facts_for_answer, llm_call_limit)
+      payload: { unmetConditions: [`unsupported_intent:${intent}`, `reason:${why}`], unknownEvidence: [], requiredUserOrSystemAction: 'none' },
     });
 
     // 모델이 응답하지 않거나 형식이 틀리면 '처리할 수 없는 요청'이 아니라 '지금 판단 모델을 쓸 수 없음'으로 구분한다.

@@ -53,6 +53,16 @@ export interface CompleteStageCommand {
   expectedChange: { status: 'done' };
 }
 
+/**
+ * 단계 기록(note) 작성. POST /_api_/stages/{stageId}/note {content, actorId?} (PDF에 없음, 2026-11-01 웹 요청에서 확인).
+ * 멱등키가 없다: 응답을 못 받으면 결과 미확인으로 두고 다시 보내지 않는다.
+ */
+export interface AddStageNoteCommand {
+  operationId: string;
+  stageId: string;
+  content: string;
+}
+
 export interface ChangeOutcomeQuery {
   operationId: string;
   itemId: string;
@@ -68,6 +78,8 @@ export interface EurekaGatewayPort {
   getChangeOutcome(q: ChangeOutcomeQuery, c: CallConstraints): Promise<GatewayResult>;
   /** 단계 기록(note) 조회. 복구 뒤 후속 질문 전에 기록의 PR 연결이 그대로인지 본다 (D-24). 없는 구현이면 이 확인을 건너뛴다 */
   listStageNotes?(query: { stageId: string; limit?: number }, c: CallConstraints): Promise<ReadOutcome<StageNoteList>>;
+  /** 단계 기록 작성 (완료 근거 PR 기록, D-28). 없는 구현이면 기록을 남기지 않는다 */
+  addStageNote?(cmd: AddStageNoteCommand, handle: DispatchHandle, c: CallConstraints): Promise<GatewayResult>;
 }
 
 // --------------------------------------------------------- github port

@@ -11,7 +11,7 @@ export interface FakeStage {
   order: number;
   completedAt?: number;
   /** 단계 기록 (GET /_api_/notes/0/list?stageId=) */
-  notes?: { id: string; content: string; uid?: string; deletedAt?: number }[];
+  notes?: { id: string; content: string; uid?: string; actorId?: string; deletedAt?: number }[];
 }
 export interface FakeItem {
   id: string;
@@ -135,6 +135,18 @@ export class FakeEurekaServer implements HttpClient {
       const limit = Number(req.query?.['limit'] ?? 10);
       const all = (stage?.notes ?? []).map((n) => ({ id: n.id, $: { sid: '1', uid: n.uid ?? '1' }, stereo: 'comment', content: n.content, stageId, deletedAt: n.deletedAt ?? 0, isResolved: false }));
       return ok({ total: all.length, limit, page: 0, list: all.slice(0, limit) });
+    }
+    if (req.method === 'POST' && (m = req.path.match(/^\/_api_\/stages\/([^/]+)\/note$/))) {
+      // 2026-11-01 웹 요청 형태: {content, actorId} → {id, stereo:'comment', content, stageId, actorId, ...}
+      const id = decodeURIComponent(m[1]!);
+      const stage = [...this.items.values()].flatMap((i) => i.stages).find((s) => s.id === id);
+      if (!stage) return { status: 404, bodyText: `.id[${id}] not found` };
+      const body = req.body as { content?: unknown; actorId?: unknown };
+      if (typeof body?.content !== 'string' || !body.content) return { status: 500, bodyText: '.content is required' };
+      const noteId = String(1000000 + [...this.items.values()].flatMap((i) => i.stages).reduce((n, s) => n + (s.notes?.length ?? 0), 0) + 1);
+      const at = this.now();
+      stage.notes = [...(stage.notes ?? []), { id: noteId, content: body.content, ...(typeof body.actorId === 'string' ? { actorId: body.actorId } : {}) }];
+      return ok({ id: noteId, createdAt: at, updatedAt: at, deletedAt: 0, stereo: 'comment', content: body.content, stageId: id, stage$: { id, name: stage.name, stereo: 'simple' }, ...(typeof body.actorId === 'string' ? { actorId: body.actorId } : {}), isResolved: false });
     }
     if (req.method === 'GET' && req.path === '/_api_/processes/0/list') {
       return ok({ total: 1, list: [{ id: 'general-work-v1@10204', name: '일반 업무', stageIds: [] }] });

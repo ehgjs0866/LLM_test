@@ -1,4 +1,5 @@
 import type {
+  AddStageNoteCommand,
   CallConstraints,
   ChangeOutcomeQuery,
   CompleteStageCommand,
@@ -40,6 +41,11 @@ export interface EurekaGatewayOptions {
    * 거절은 CANCELLED, 시간 초과는 DEADLINE_EXCEEDED — 둘 다 not_sent.
    */
   operatorConfirm?: EurekaOperatorConfirm;
+  /**
+   * 단계 기록 작성자(actorId, 예: 1000011@10200). 웹은 로그인한 사람의 actorId를 보낸다.
+   * 없으면 보내지 않는다 (API 키 호출에서 필수인지는 미확인, D-28)
+   */
+  noteActorId?: string;
 }
 
 export interface EurekaOperatorConfirm {
@@ -213,6 +219,29 @@ export class EurekaGateway implements EurekaGatewayPort {
         const again = await precheck();
         return 'stop' in again ? again.stop : undefined;
       },
+    );
+  }
+
+  /**
+   * 단계 기록 작성 (D-28). POST /_api_/stages/{stageId}/note {content, actorId?} — PDF에 없고 2026-11-01 웹 요청에서 확인.
+   * 응답: {id, stereo:'comment', content, stageId, actorId, ...}. 멱등키가 없으므로 응답을 못 받으면 unknown이고 다시 보내지 않는다.
+   */
+  async addStageNote(cmd: AddStageNoteCommand, handle: DispatchHandle, c: CallConstraints): Promise<GatewayResult> {
+    const body = { content: cmd.content, ...(this.o.noteActorId ? { actorId: this.o.noteActorId } : {}) };
+    return this.sendWrite(
+      { method: 'POST', path: `/_api_/stages/${enc(cmd.stageId)}/note`, body },
+      handle,
+      c,
+      (b) => {
+        const n = b as { id?: unknown; stageId?: unknown; content?: unknown; deletedAt?: unknown };
+        // 같은 단계에 같은 본문으로 만들어졌을 때만 기록 ID를 증거로 쓴다
+        if (n?.id === undefined || String(n.stageId ?? '') !== cmd.stageId || n.content !== cmd.content) return { response: { raw: b } };
+        return {
+          response: { noteId: String(n.id), stageId: cmd.stageId },
+          externalRefs: [{ system: 'eureka' as const, kind: 'stage_note', id: String(n.id) }],
+        };
+      },
+      { action: 'add_stage_note', target: `stage ${cmd.stageId}` },
     );
   }
 

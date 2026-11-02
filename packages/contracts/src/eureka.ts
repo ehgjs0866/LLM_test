@@ -125,3 +125,21 @@ export const TaskState = z.object({
   observedAt: UtcTimestamp,
 });
 export type TaskState = z.infer<typeof TaskState>;
+
+/**
+ * 완료 근거 기록 문구 (D-28). 단계 완료가 성공한 뒤 단계 기록(note)에 남긴다.
+ * - 표시(EVIDENCE_NOTE_MARK)와 PR 주소, 승인 커밋 앞 7자리가 모두 있는 기록이 이미 있으면 다시 쓰지 않는다
+ * - 이메일·토큰 같은 계정 정보는 넣지 않는다
+ */
+export const EVIDENCE_NOTE_MARK = '[DeskPet 완료 근거]';
+
+export function evidenceNoteContent(e: { owner: string; name: string; prNumber: number; approvedSha: string; reviewId?: string }): string {
+  const url = `https://github.com/${e.owner}/${e.name}/pull/${e.prNumber}`;
+  return `${EVIDENCE_NOTE_MARK} ${url} 승인 후 단계 완료 (커밋 ${e.approvedSha.slice(0, 7)}${e.reviewId ? `, 리뷰 ${e.reviewId}` : ''})`;
+}
+
+/** 같은 PR·같은 승인 커밋의 완료 근거 기록인지 */
+export function isSameEvidenceNote(content: string, e: { owner: string; name: string; prNumber: number; approvedSha: string }): boolean {
+  if (!content.includes(EVIDENCE_NOTE_MARK) || !content.includes(e.approvedSha.slice(0, 7))) return false;
+  return extractPrLinks(content).some((l) => l.prNumber === e.prNumber && l.owner.toLowerCase() === e.owner.toLowerCase() && l.name.toLowerCase() === e.name.toLowerCase());
+}

@@ -278,6 +278,18 @@ export const OperationRecord = z.object({
       observedAt: UtcTimestamp,
     })
     .optional(),
+  /**
+   * 완료 근거 기록(D-28). Eureka 단계 완료가 성공한 뒤 단계 기록(note)에 승인 PR을 남긴 결과.
+   * dispatching은 보내기 직전 기록이다: 이 상태로 남아 있으면 보냈는지 모르므로 다시 보내지 않는다.
+   */
+  evidenceNote: z
+    .object({
+      status: z.enum(['dispatching', 'written', 'already_present', 'failed', 'unknown', 'skipped']),
+      noteId: z.string().optional(),
+      reason: z.string().optional(),
+      observedAt: UtcTimestamp,
+    })
+    .optional(),
   expectedOutcome: ExpectedOutcome,
   checkRuleVersion: z.string().min(1),
   /** 실제 보낸 대상·행위·버전. 민감 인증정보 제외 */

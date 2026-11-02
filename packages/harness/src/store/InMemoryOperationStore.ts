@@ -263,6 +263,7 @@ export class InMemoryOperationStore implements OperationStore {
       if (ev.recovery) op.recovery = ev.recovery;
       if (ev.actionResult) op.actionResult = clone(ev.actionResult);
       if (ev.followUp) op.followUp = clone(ev.followUp);
+      if (ev.evidenceNote) op.evidenceNote = clone(ev.evidenceNote);
       if (ev.releaseAuthority) delete op.currentExecutionAuthority;
       this.touch(op);
       return clone(op);

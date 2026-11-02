@@ -14,5 +14,7 @@ export function createEurekaRestGateway(env: Record<string, string | undefined> 
   if (!key) throw new Error('EUREKA_API_KEY is not set (.env)');
   const baseUrl = env['EUREKA_BASE_URL'] || EUREKA_DEV_BASE_URL;
   const http = new FetchHttpClient(baseUrl, () => ({ 'x-api-key': key }), fetchImpl, opts.limiter);
-  return new EurekaGateway({ http, now: () => Date.now(), totalTimeoutMs: 8_000, allowWrites: opts.allowWrites ?? false, ...(opts.operatorConfirm ? { operatorConfirm: opts.operatorConfirm } : {}) });
+  // 단계 기록 작성자 (D-28). 웹은 로그인한 사람의 actorId를 보낸다. 없으면 보내지 않는다
+  const noteActorId = env['EUREKA_NOTE_ACTOR_ID']?.trim();
+  return new EurekaGateway({ http, now: () => Date.now(), totalTimeoutMs: 8_000, allowWrites: opts.allowWrites ?? false, ...(opts.operatorConfirm ? { operatorConfirm: opts.operatorConfirm } : {}), ...(noteActorId ? { noteActorId } : {}) });
 }

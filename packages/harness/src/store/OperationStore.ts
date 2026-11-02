@@ -97,6 +97,7 @@ export interface OperationEvidence {
   recovery?: OperationRecord['recovery'];
   actionResult?: ActionResult;
   followUp?: OperationRecord['followUp'];
+  evidenceNote?: OperationRecord['evidenceNote'];
   releaseAuthority?: boolean;
 }
 

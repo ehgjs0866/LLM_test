@@ -70,7 +70,25 @@ const tls = tlsCert && tlsKey ? (() => {
 // ------------------------------------------------------------------ wiring
 // LLM Guide 호출 시간 상한은 .env LLM_GUIDE_TIMEOUT_MS로 바꿀 수 있다 (기본 8초)
 const guideTimeout = Number(env['LLM_GUIDE_TIMEOUT_MS']);
-const config = { ...DEFAULT_POLICY, ...(guideTimeout > 0 ? { llmGuideTimeoutMs: guideTimeout } : {}) };
+// 완료 근거 기록 (D-28): 단계 완료 확인에 함께 묻고, 완료되면 단계 기록에 승인 PR 주소를 남긴다. off로 끈다
+const evidenceNote = (env['EUREKA_EVIDENCE_NOTE'] ?? 'on').trim().toLowerCase() !== 'off';
+// 2차 의도 확인 (D-29): llm·unclear 같은 일반 의도를 LLM이 다시 보고 PR 리뷰·승인이면 규칙 경로로. off로 끈다
+const intentRecheck = (env['DESKPET_INTENT_RECHECK'] ?? 'on').trim().toLowerCase() !== 'off';
+// 쓰기(승인 요청·확인 답변) 입력 신뢰도 기준. 기본값은 그대로(STT 0.85, 라우터 0.8). 시연 환경에 맞출 때만 .env로 바꾼다 (0~1)
+const ratio = (v: string | undefined) => {
+  const n = Number(v);
+  return v !== undefined && v.trim() !== '' && n >= 0 && n <= 1 ? n : undefined;
+};
+const minStt = ratio(env['DESKPET_MIN_STT_CONFIDENCE']);
+const minRoute = ratio(env['DESKPET_MIN_ROUTE_CONFIDENCE']);
+const config = {
+  ...DEFAULT_POLICY,
+  evidenceNote,
+  intentRecheck,
+  ...(guideTimeout > 0 ? { llmGuideTimeoutMs: guideTimeout } : {}),
+  ...(minStt !== undefined ? { minSttConfidenceForWrite: minStt } : {}),
+  ...(minRoute !== undefined ? { minRouteConfidenceForWrite: minRoute } : {}),
+};
 const storeOpts = {
   clock: systemClock,
   ids: randomIdGen,
@@ -160,6 +178,9 @@ notify = (n) => {
 async function main() {
   console.log('DeskPet Harness 서버');
   for (const l of poc.banner) console.log(l);
+  console.log(`쓰기 입력 신뢰도 기준: STT ${config.minSttConfidenceForWrite}${minStt !== undefined ? ' (.env로 바꿈)' : ''}, 라우터 ${config.minRouteConfidenceForWrite}${minRoute !== undefined ? ' (.env로 바꿈)' : ''}`);
+  console.log(`2차 의도 확인(D-29): ${intentRecheck ? (llm.guideClient ? '켜짐 — llm·unclear 요청을 LLM이 다시 보고 PR 리뷰·승인이면 규칙 경로로' : '켜져 있지만 LLM 없음 (동작 안 함)') : '꺼짐 (DESKPET_INTENT_RECHECK=off)'}`);
+  console.log(`완료 근거 기록(D-28): ${evidenceNote ? `켜짐 — 단계 완료 확인에 함께 묻고 단계 기록에 PR 주소를 남김${env['EUREKA_NOTE_ACTOR_ID']?.trim() ? ' (작성자 actorId 지정)' : ' (작성자 actorId 없음)'}` : '꺼짐 (EUREKA_EVIDENCE_NOTE=off)'}`);
   console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (사용자 확인 답변만으로 보냄)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (사용자 확인 답변만으로 보냄)` : '꺼짐'}`);
   console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model} (동시 ${llm.limiter?.stats().max ?? '-'}건)` : `LLM 꺼짐 (${llm.reason})`);
   console.log(`동시 호출 상한: GitHub ${githubLimiter.stats().max} / Eureka ${eurekaLimiter.stats().max} (D-24)`);

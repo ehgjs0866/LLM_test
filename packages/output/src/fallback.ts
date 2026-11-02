@@ -109,6 +109,20 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
       parts.push(`Eureka의 '${name}' 단계를 완료로 반영했어요.`);
       display.push('Eureka 반영 성공');
       emotion = 'cheerful';
+      // 완료 근거 기록 (D-28)
+      const note = (f['stageCompletion'] as { evidenceNote?: { status?: string } } | undefined)?.evidenceNote;
+      const noteMsg: Record<string, [string, string]> = {
+        written: ['승인한 PR 주소도 단계 기록에 남겼어요.', '완료 근거 기록 작성'],
+        already_present: ['승인한 PR 주소는 이미 단계 기록에 있어요.', '완료 근거 기록 있음'],
+        unknown: ['단계 기록 작성 결과는 확인하지 못했어요. 같은 기록이 두 번 생기지 않도록 다시 쓰지 않았어요.', '완료 근거 기록 결과 미확인'],
+        failed: ['단계 기록에는 PR 주소를 남기지 못했어요. 완료 반영은 그대로예요.', '완료 근거 기록 실패'],
+        skipped: ['단계 기록에는 PR 주소를 남기지 못했어요. 완료 반영은 그대로예요.', '완료 근거 기록 건너뜀'],
+      };
+      const nm = note?.status ? noteMsg[note.status] : undefined;
+      if (nm) {
+        parts.push(nm[0]);
+        display.push(nm[1]);
+      }
     } else if (stage.status === 'unknown') {
       parts.push(`Eureka 반영 결과를 아직 확인하지 못했어요. 다시 실행하지 않고 상태를 확인할게요.`);
       display.push('Eureka 반영 결과 미확인');

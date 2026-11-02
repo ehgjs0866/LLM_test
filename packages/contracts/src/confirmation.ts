@@ -16,7 +16,8 @@ export function confirmationTokens(scope: ConfirmationScope): string[] {
   if (t.kind === 'eureka_stage') {
     const name = scope.exactChange?.['stageName'];
     const label = typeof name === 'string' && name ? `'${name}' 단계` : `'${t.stageId}' 단계`;
-    return [`Eureka의 ${label}를 완료로 반영`];
+    // 완료 근거 기록(D-28)도 같은 동의로 받는다: 질문 문장에 함께 말한다
+    return [scope.exactChange?.['evidenceNote'] === true ? `Eureka의 ${label}를 완료로 반영하고, 승인한 PR 주소를 단계 기록에 추가` : `Eureka의 ${label}를 완료로 반영`];
   }
   return [scope.action];
 }

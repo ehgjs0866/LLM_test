@@ -33,12 +33,15 @@ import {
   type TaskRef,
   type FollowUpNotice,
   confirmationTokens,
+  evidenceNoteContent,
   extractPrLinks,
+  isSameEvidenceNote,
   deliveredQuestionMatches,
 } from '@deskpet/contracts';
 import { StoreDispatchOwner } from './dispatch/DispatchOwner.js';
 import { reviewFacts, type ReviewFacts } from './facts.js';
-import { RuleBasedGuide, type Guide, type GuideFacts } from './guide/Guide.js';
+import { RULE_INTENTS, RuleBasedGuide, type Guide, type GuideFacts } from './guide/Guide.js';
+import { classifyIntent } from './guide/intentClassifier.js';
 import { LlmGuide, RuleFirstGuide } from './guide/LlmGuide.js';
 import { DEFAULT_POLICY, type PolicyConfig } from './policy/config.js';
 import { expectedOutcomeFor } from './policy/expectedOutcome.js';
@@ -147,7 +150,12 @@ export class HarnessService {
     if (dup) return dup; // 동일 turnId 재전달은 저장된 결과로 응답
 
     const meta = this.meta(req.requestId, req.currentTurn, req.context, req.constraints.deadlineAt, intentOf(req.currentTurn));
-    const result = await this.withTimings(() => (RETRY_INTENTS.has(meta.intent) ? this.retryStageCompletion(meta, req.currentTurn, req.context, req.constraints) : this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints)));
+    const result = await this.withTimings(async () => {
+      if (RETRY_INTENTS.has(meta.intent)) return this.retryStageCompletion(meta, req.currentTurn, req.context, req.constraints);
+      const recheck = await this.recheckIntent(meta, req.currentTurn, req.context, req.constraints.deadlineAt);
+      const r = await this.runGuideLoop(meta, req.currentTurn, req.context, req.constraints);
+      return recheck ? { ...r, facts: { ...r.facts, intentRecheck: recheck } } : r;
+    });
     await this.d.store.recordTurnResult(req.currentTurn.turnId, result);
     this.settle(result);
     return result;
@@ -262,6 +270,21 @@ export class HarnessService {
     return this.stageCompletionWithWait(meta, prepared.operation, prepared.authority, constraints);
   }
 
+  /**
+   * 2차 의도 확인 (D-29). PR·재시도 의도가 아닌 요청(`llm`·`unclear` 등)을 LLM이 한 번 더 보고,
+   * PR 리뷰·승인 요청이면 meta.intent를 바꿔 규칙 Guide 경로로 보낸다. 승인 실행 조건(검사·확인 질문)은 그대로다.
+   * 실패하면 원래 의도를 유지한다. 결과는 facts.intentRecheck로 남긴다.
+   */
+  private async recheckIntent(meta: RequestMeta, turn: CurrentTurnInput, ctx: ContextPacket, deadlineAt: string): Promise<Record<string, unknown> | undefined> {
+    if (!this.cfg.intentRecheck || !this.d.llm || RULE_INTENTS.has(meta.intent) || meta.intent.startsWith('eureka.')) return undefined;
+    const from = meta.intent;
+    const c = await classifyIntent(this.d.llm, { text: turn.rawText, routerIntent: from, hasPrTarget: ctx.target?.kind === 'github_pr', deadlineAt, timeoutMs: this.cfg.llmGuideTimeoutMs, now: this.d.clock.nowMs() });
+    if ('error' in c) return { from, to: from, changed: false, error: c.error };
+    if (c.intent === 'other') return { from, to: from, changed: false, reason: c.reason };
+    meta.intent = c.intent;
+    return { from, to: c.intent, changed: true, by: 'llm', reason: c.reason };
+  }
+
   // ============================================================ follow-up (D-23)
   /**
    * Eureka 반영을 실행하고 followUpReplyWaitMs만 기다린다. 그 안에 끝나면 결과를, 아니면 '진행 중'을 돌려주고
@@ -314,6 +337,12 @@ export class HarnessService {
     const facts: Record<string, unknown> = { recovered: { operationId: op.operationId, action: op.action } };
     if (op.action === 'complete_stage' && op.target.kind === 'eureka_stage') {
       facts['stageCompletion'] = { status: actionResult.status, itemId: op.target.itemId, stageId: op.target.stageId, stageName: op.actualRequest['stageName'] };
+    }
+    if (op.action === 'complete_stage' && actionResult.status === 'succeeded') {
+      // 복구로 완료가 확인되면 완료 근거 기록도 남긴다 (D-28). 이미 시도했으면 다시 보내지 않는다
+      const cur = (await this.d.store.getOperation(op.operationId)) ?? op;
+      const note = await this.writeEvidenceNote(cur, new Date(this.d.clock.nowMs() + 30_000).toISOString()).catch(() => undefined);
+      if (note) facts['stageCompletion'] = { ...(facts['stageCompletion'] as Record<string, unknown>), evidenceNote: note };
     }
     let result: HarnessResult = { requestId: op.requestId, disposition: 'completed', actionResults: [actionResult], facts, sources: [], processingErrors: [] };
     if (op.action === 'submit_approval' && actionResult.status === 'succeeded') {
@@ -431,6 +460,7 @@ export class HarnessService {
         stageName: check.evidence['stageName'] ?? x['stageName'],
         followUpObservedAt: this.d.clock.nowIso(),
         retryOf: last.operationId,
+        ...this.evidenceNoteFlag(),
       },
     };
     const view = await this.createQuestion(meta, 'confirmation', 'confirm_stage_completion', [], scope);
@@ -862,6 +892,7 @@ export class HarnessService {
         priorStageStatus: check.evidence['stageStatus'],
         stageName: check.evidence['stageName'],
         followUpObservedAt: this.d.clock.nowIso(),
+        ...this.evidenceNoteFlag(),
       },
     };
     const view = await this.createQuestion(meta, 'confirmation', 'confirm_stage_completion', [], scope);
@@ -943,9 +974,74 @@ export class HarnessService {
     const out = await this.runWrite(meta, op, authority, constraints, (h) => this.d.eureka.completeStage(cmd, h, { deadlineAt: constraints.deadlineAt }));
     if ('assessmentPending' in out) return this.assessmentPendingResult(meta, out.operation);
     const { actionResult } = out;
+    const note = actionResult.status === 'succeeded' ? await this.writeEvidenceNote(out.operation, constraints.deadlineAt) : undefined;
     return this.result(meta, 'completed', [actionResult], {
-      stageCompletion: { status: actionResult.status, itemId: t.itemId, stageId: t.stageId, stageName: ar0['stageName'], dispatchState: actionResult.dispatchState },
+      stageCompletion: { status: actionResult.status, itemId: t.itemId, stageId: t.stageId, stageName: ar0['stageName'], dispatchState: actionResult.dispatchState, ...(note ? { evidenceNote: note } : {}) },
     });
+  }
+
+  /** 단계 완료 확인 질문에 완료 근거 기록(D-28)을 함께 묻는지. 켜져 있고 Gateway가 기록 작성을 지원할 때만 */
+  private evidenceNoteFlag(): { evidenceNote?: true } {
+    return this.cfg.evidenceNote && this.d.eureka.addStageNote ? { evidenceNote: true } : {};
+  }
+
+  /**
+   * 완료 근거 기록 (D-28). 단계 완료가 성공으로 판정된 뒤, 동의 범위에 evidenceNote가 있을 때만 쓴다.
+   * - 같은 operation에서 이미 시도했으면(dispatching·written·unknown 등) 다시 보내지 않는다
+   * - 쓰기 전에 단계 기록을 읽어 같은 PR·같은 승인 커밋의 근거 기록이 있으면 쓰지 않는다 (복구·재시작 중복 방지)
+   * - 기록을 못 읽으면 쓰지 않는다. 응답을 못 받으면 unknown으로 두고 다시 보내지 않는다
+   * - 단계 완료 결과에는 영향을 주지 않는다 (실패해도 완료는 그대로)
+   */
+  private async writeEvidenceNote(op: OperationRecord, deadlineAt: string): Promise<{ status: string; noteId?: string; reason?: string } | undefined> {
+    if (op.action !== 'complete_stage' || op.target.kind !== 'eureka_stage' || op.actualRequest['evidenceNote'] !== true) return undefined;
+    if (op.evidenceNote) return { status: op.evidenceNote.status === 'dispatching' ? 'unknown' : op.evidenceNote.status, ...(op.evidenceNote.noteId ? { noteId: op.evidenceNote.noteId } : {}), reason: 'already_attempted' };
+    const attemptId = op.attempts[op.attempts.length - 1]!.attemptId;
+    const save = async (status: NonNullable<OperationRecord['evidenceNote']>['status'], extra: { noteId?: string; reason?: string } = {}) => {
+      await this.d.store.appendEvidence(op.operationId, { attemptId, evidenceNote: { status, ...extra, observedAt: this.d.clock.nowIso() } }).catch(() => undefined);
+      return { status, ...extra };
+    };
+    const add = this.d.eureka.addStageNote?.bind(this.d.eureka);
+    if (!add || !this.d.eureka.listStageNotes) return save('skipped', { reason: 'not_supported' });
+    const approvalOp = await this.d.store.getOperation(String(op.actualRequest['approvalOperationId']));
+    if (!approvalOp || approvalOp.target.kind !== 'github_pr') return save('skipped', { reason: 'approval_operation_missing' });
+    const pr = approvalOp.target;
+    const e = { owner: pr.repository.owner, name: pr.repository.name, prNumber: pr.prNumber, approvedSha: String(op.actualRequest['approvedSha'] ?? ''), reviewId: String(op.actualRequest['reviewId'] ?? '') || undefined };
+    if (e.approvedSha.length < 7) return save('skipped', { reason: 'approved_sha_missing' });
+    const stageId = op.target.stageId;
+    const c = { deadlineAt };
+    const notes = await this.d.eureka.listStageNotes({ stageId, limit: 100 }, c);
+    if (!notes.ok || notes.data!.completeness !== 'complete') return save('skipped', { reason: 'notes_unverified' });
+    const same = notes.data!.notes.find((n) => isSameEvidenceNote(n.content, e));
+    if (same) return save('already_present', { noteId: same.noteId });
+
+    const content = evidenceNoteContent({ ...e, ...(e.reviewId ? { reviewId: e.reviewId } : {}) });
+    let marked = false;
+    const handle = {
+      operationId: op.operationId,
+      attemptId,
+      ownerRevision: op.revision,
+      // 보내기 직전에 '보내는 중'을 먼저 남긴다. 이 기록이 남지 않으면 보내지 않는다
+      beforeDispatch: async () => {
+        try {
+          const rec = await this.d.store.appendEvidence(op.operationId, { attemptId, evidenceNote: { status: 'dispatching', observedAt: this.d.clock.nowIso() } });
+          marked = true;
+          return { ok: true as const, ack: { kind: 'may_have_been_sent' as const, operationId: op.operationId, attemptId, ownerRevision: rec.revision, persistedAt: this.d.clock.nowIso() } };
+        } catch (err) {
+          return { ok: false as const, reason: 'storage_error' as const, detail: err instanceof Error ? err.message : 'store' };
+        }
+      },
+    };
+    let g: GatewayResult;
+    try {
+      g = await add({ operationId: op.operationId, stageId, content }, handle, c);
+    } catch {
+      return marked ? save('unknown', { reason: 'gateway_error' }) : save('failed', { reason: 'gateway_error_before_send' });
+    }
+    const noteId = g.externalRefs.find((r) => r.kind === 'stage_note')?.id;
+    if (g.outcome === 'response' && noteId) return save('written', { noteId });
+    if (g.dispatchState === 'not_sent') return save('failed', { reason: g.error?.provisionalCode ?? 'not_sent' });
+    if (g.outcome === 'no_response' || g.outcome === 'response') return save('unknown', { reason: g.outcome === 'response' ? 'unexpected_response' : 'no_response' });
+    return save('failed', { reason: g.error?.provisionalCode ?? 'error' });
   }
 
   /**
