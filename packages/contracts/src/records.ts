@@ -154,7 +154,8 @@ export type PendingState = z.infer<typeof PendingState>;
 
 export const QuestionDeliveryEvidence = z.object({
   deliveredAt: UtcTimestamp,
-  channel: z.enum(['speech', 'display', 'web']),
+  /** retry_request: 사용자가 실패한 반영을 "다시 해줘"로 직접 요청함 — 그 요청을 동의로 본다 (D-23). 질문을 말하지 않았다 */
+  channel: z.enum(['speech', 'display', 'web', 'retry_request']),
   sourceMessageId: Id,
   deliveredText: z.string().optional(),
 });
@@ -274,6 +275,18 @@ export const OperationRecord = z.object({
       eligibility: FollowUpEligibility,
       conditions: z.array(z.string()),
       evidence: z.record(z.unknown()),
+      observedAt: UtcTimestamp,
+    })
+    .optional(),
+  /**
+   * 완료 근거 기록(D-28). Eureka 단계 완료가 성공한 뒤 단계 기록(note)에 승인 PR을 남긴 결과.
+   * dispatching은 보내기 직전 기록이다: 이 상태로 남아 있으면 보냈는지 모르므로 다시 보내지 않는다.
+   */
+  evidenceNote: z
+    .object({
+      status: z.enum(['dispatching', 'written', 'already_present', 'failed', 'unknown', 'skipped']),
+      noteId: z.string().optional(),
+      reason: z.string().optional(),
       observedAt: UtcTimestamp,
     })
     .optional(),
