@@ -18,6 +18,8 @@ export interface ApprovalCheckInput {
    * (사용자 결정 2026-11-03, README D-30). PR 상태·SHA·권한·본인 PR 조건은 그대로 검사한다
    */
   ignoreChecks?: boolean;
+  /** false면 허용 저장소 목록(D-36)에 없는 저장소라 승인하지 않는다. 생략하면 제한 없음 */
+  repositoryAllowed?: boolean;
 }
 
 type CheckRun = ChecksData['runs'][number];
@@ -50,7 +52,8 @@ function pickLatest(g: CheckRun[]): CheckRun {
 
 export function approvalBlockers(i: ApprovalCheckInput): string[] {
   const out: string[] = [];
-  if (!i.pr) return ['pr_basics_unavailable'];
+  if (i.repositoryAllowed === false) out.push('repository_not_allowed');
+  if (!i.pr) return [...out, 'pr_basics_unavailable'];
   if (i.pr.state !== 'open') out.push(`pr_${i.pr.state}`);
   if (i.pr.draft) out.push('pr_draft');
   if (i.pr.headSha !== i.expectedHeadSha) out.push('sha_changed');

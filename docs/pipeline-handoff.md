@@ -31,7 +31,7 @@
 | 항목 | 지금 Harness가 기대하는 값 |
 | --- | --- |
 | 라우터 intention | 라우터 값 그대로 (`llm`·`unclear`·`eureka`+operation). `llm`·`unclear`는 Harness가 LLM으로 PR 리뷰·승인인지 다시 판단한다(D-29). 그 밖에 `confirm.approve`, `confirm.reject`, `eureka.retry` |
-| 음성 신뢰도 | `transcript.sttConfidence` 실제 값. 승인 답변은 0.85 이상, 라우터 `overallConfidence` 0.8 이상이어야 쓰기 진행 |
+| 음성 신뢰도 | `transcript.sttConfidence` 실제 값. 승인 답변은 0.85 이상, 라우터 `overallConfidence` 0.53 이상이어야 쓰기 진행 |
 | 승인 답변 | 라우터가 승인으로 판단하면 `mutationApproved:true`. Harness도 문장(응·네·승인…)을 따로 확인한다 |
 | 대화 ID | 요청의 `conversationId`(확장) 또는 `context.stamp.conversationId`. 같은 대화의 새 업무 요청은 대기 중 질문을 철회한다 |
 

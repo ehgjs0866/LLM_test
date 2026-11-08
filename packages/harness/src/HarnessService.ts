@@ -35,6 +35,7 @@ import {
   confirmationTokens,
   evidenceNoteContent,
   extractPrLinks,
+  isRepositoryAllowed,
   isSameEvidenceNote,
   deliveredQuestionMatches,
 } from '@deskpet/contracts';
@@ -809,7 +810,7 @@ export class HarnessService {
       { repository: a.repository, prNumber: a.prNumber, requestedSections: a.requestedSections, ...(a.expectedHeadSha ? { expectedHeadSha: a.expectedHeadSha } : {}), deadlineAt: constraints.deadlineAt },
       { deadlineAt: constraints.deadlineAt, signal: meta.abort.signal },
     );
-    const facts = ctx.prBasics ? reviewFacts(ctx, purpose === 'approval_precheck' ? (a.expectedHeadSha ?? ctx.initialHeadSha) : undefined, { ignoreChecks: this.cfg.prChecks === 'skip' }) : undefined;
+    const facts = ctx.prBasics ? reviewFacts(ctx, purpose === 'approval_precheck' ? (a.expectedHeadSha ?? ctx.initialHeadSha) : undefined, { ignoreChecks: this.cfg.prChecks === 'skip', repositoryAllowed: isRepositoryAllowed(this.cfg.allowedRepositories, a.repository.owner, a.repository.name) }) : undefined;
     const g: GatewayResult = {
       mode: 'read',
       dispatchState: 'sent',
@@ -1000,7 +1001,7 @@ export class HarnessService {
    */
   private async findLinkedStage(t: GitHubPrTarget, deadlineAt: string): Promise<{ status: 'linked'; ref: TaskRef } | { status: 'none' | 'ambiguous' | 'partial' | 'failed' }> {
     const read = this.d.eureka.listStageNotes?.bind(this.d.eureka);
-    if (!read) return { status: 'none' };
+    if (!read || !isRepositoryAllowed(this.cfg.allowedRepositories, t.repository.owner, t.repository.name)) return { status: 'none' };
     const c = { deadlineAt };
     const list = await this.d.eureka.listTasks({ onlyOpen: true, limit: 100 }, c);
     if (!list.ok) return { status: 'failed' };

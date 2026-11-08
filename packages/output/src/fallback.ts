@@ -246,6 +246,7 @@ function reviewSentence(r: ReviewFactsLike): string {
 
 function blockedSentence(reasons: string[], pr?: number, review?: ReviewFactsLike): string {
   const n = pr ? `PR ${pr}번은 ` : '';
+  if (reasons.includes('repository_not_allowed')) return `${n}승인을 허용한 저장소의 PR이 아니라 승인하지 않았어요.`;
   if (reasons.includes('sha_changed')) return '리뷰를 들은 뒤 새 커밋이 추가됐어요. 변경 내용을 다시 확인한 후 승인해야 해요.';
   if (reasons.includes('pr_merged')) return `${n}이미 병합되어 승인할 수 없어요.`;
   if (reasons.includes('pr_closed')) return `${n}닫혀 있어 승인할 수 없어요.`;

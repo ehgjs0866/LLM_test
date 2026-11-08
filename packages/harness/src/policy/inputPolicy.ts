@@ -24,7 +24,7 @@ export function writeInputBlockers(turn: CurrentTurnInput, cfg: PolicyConfig): s
 export type AnswerVerdict = 'approved' | 'rejected' | 'unclear';
 
 const REJECT = /(아니|안\s*돼|취소|보류|하지\s*마|싫어|그만|nope|\bno\b|cancel)/i;
-const APPROVE = /(^|\s)(응|네|예|그래|좋아|맞아|ㅇㅇ|승인|완료해|진행해|yes|ok|okay)/i;
+const APPROVE = /(^|\s)(응|네|예|그래|좋아|맞아|ㅇㅇ|승인|완료해|진행해|반영해|yes|ok|okay)/i;
 
 /**
  * 확인 답변 해석 (규칙 기반, inference). 라우터 intention이 명시적이면 우선한다.

@@ -24,7 +24,7 @@ import { createEurekaRestGateway, GitHubReviewGateway, parseRequiredChecksFallba
 import { DEFAULT_POLICY, FileWikiReader, HarnessService, InMemoryOperationStore, RecoveryWorker, summarizeTimings, type TimingEntry, StoreLockedError, randomIdGen, systemClock } from '@deskpet/harness';
 import { createLlmFromEnv } from '@deskpet/llm';
 import { OutputService, fallbackText, mapHarnessResult } from '@deskpet/output';
-import { ConcurrencyLimiter, type FollowUpNotice } from '@deskpet/contracts';
+import { ConcurrencyLimiter, parseAllowedRepositories, type FollowUpNotice } from '@deskpet/contracts';
 import { DirectHarnessInbound, EurekaBridge, HarnessWsServer, PipelineBridge } from '@deskpet/server';
 
 try {
@@ -81,11 +81,17 @@ const ratio = (v: string | undefined) => {
 };
 const minStt = ratio(env['DESKPET_MIN_STT_CONFIDENCE']);
 const minRoute = ratio(env['DESKPET_MIN_ROUTE_CONFIDENCE']);
+const allowed = parseAllowedRepositories(env['DESKPET_ALLOWED_REPOS']);
+if (allowed.invalid.length) {
+  console.log(`✗ DESKPET_ALLOWED_REPOS 형식이 틀렸어요 (owner/name,owner/name): ${allowed.invalid.join(', ')}`);
+  process.exit(1);
+}
 const config = {
   ...DEFAULT_POLICY,
   evidenceNote,
   intentRecheck,
   prChecks: 'enforce' as 'enforce' | 'skip',
+  ...(allowed.repos.length ? { allowedRepositories: allowed.repos } : {}),
   ...(guideTimeout > 0 ? { llmGuideTimeoutMs: guideTimeout } : {}),
   ...(minStt !== undefined ? { minSttConfidenceForWrite: minStt } : {}),
   ...(minRoute !== undefined ? { minRouteConfidenceForWrite: minRoute } : {}),
@@ -159,7 +165,7 @@ const server = new HarnessWsServer({
     output,
     bridge: pipelineBridge,
     ...(eurekaBridgeMode === 'internal'
-      ? { eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }) }
+      ? { eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(allowed.repos.length ? { allowedRepositories: allowed.repos } : {}), ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }) }
       : {}),
   }),
   store,
@@ -191,6 +197,7 @@ async function main() {
   for (const l of poc.banner) console.log(l);
   console.log(`직접 Eureka 요청(eureka.*): ${eurekaBridgeMode === 'internal' ? '이 서버에서 받음' : '받지 않음 — Eureka 내부 API 서버(pnpm eureka:server)로 (DESKPET_EUREKA_BRIDGE=external)'}`);
   console.log(`PR 검사(D-30): ${prChecks === 'skip' ? '조회하지 않음 — 승인 조건에서도 제외 (DESKPET_PR_CHECKS=enforce로 되돌림)' : '조회·필수 검사 확인'}`);
+  console.log(`승인 허용 저장소(D-36): ${allowed.repos.length ? allowed.repos.join(', ') : '제한 없음 (DESKPET_ALLOWED_REPOS 비어 있음)'}`);
   console.log(`쓰기 입력 신뢰도 기준: STT ${config.minSttConfidenceForWrite}${minStt !== undefined ? ' (.env로 바꿈)' : ''}, 라우터 ${config.minRouteConfidenceForWrite}${minRoute !== undefined ? ' (.env로 바꿈)' : ''}`);
   console.log(`2차 의도 확인(D-29): ${intentRecheck ? (llm.guideClient ? '켜짐 — llm·unclear 요청을 LLM이 다시 보고 PR 리뷰·승인이면 규칙 경로로' : '켜져 있지만 LLM 없음 (동작 안 함)') : '꺼짐 (DESKPET_INTENT_RECHECK=off)'}`);
   console.log(`완료 근거 기록(D-28): ${evidenceNote ? `켜짐 — 단계 완료 확인에 함께 묻고 단계 기록에 PR 주소를 남김${env['EUREKA_NOTE_ACTOR_ID']?.trim() ? ' (작성자 actorId 지정)' : ' (작성자 actorId 없음)'}` : '꺼짐 (EUREKA_EVIDENCE_NOTE=off)'}`);

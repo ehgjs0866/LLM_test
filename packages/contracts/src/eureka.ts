@@ -71,6 +71,8 @@ export const PrLinkLookup = z.object({
   status: PrLinkStatus,
   /** linked면 1개. ambiguous면 후보 전체 */
   links: z.array(LinkedPr),
+  /** 허용 저장소 목록(D-36)에 없어 뺀 PR 주소 수. 0이면 생략 */
+  excludedCount: z.number().int().positive().optional(),
   observedAt: UtcTimestamp,
 });
 export type PrLinkLookup = z.infer<typeof PrLinkLookup>;
@@ -78,8 +80,24 @@ export type PrLinkLookup = z.infer<typeof PrLinkLookup>;
 const PR_URL = /https:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})\/pull\/(\d{1,9})(?![\w/])/g;
 
 /**
+ * 허용 저장소 목록 (D-36). `owner/name` 형식, 대소문자 무시. 목록이 없거나 비어 있으면 제한하지 않는다.
+ */
+export function isRepositoryAllowed(allowed: readonly string[] | undefined, owner: string, name: string): boolean {
+  if (!allowed || allowed.length === 0) return true;
+  const key = `${owner}/${name}`.toLowerCase();
+  return allowed.some((r) => r.trim().toLowerCase() === key);
+}
+
+/** `owner/name,owner/name` 문자열을 목록으로. 형식이 틀린 항목은 invalid로 돌려준다 */
+export function parseAllowedRepositories(raw: string | undefined): { repos: string[]; invalid: string[] } {
+  const items = (raw ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const ok = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+  return { repos: items.filter((x) => ok.test(x)), invalid: items.filter((x) => !ok.test(x)) };
+}
+
+/**
  * 기록 본문에서 GitHub PR 주소만 뽑는다. 그 밖의 문장은 버린다 (기록은 데이터, 지시가 아님).
- * 같은 PR은 하나로 합친다. 허용 저장소 목록 같은 보안 규칙은 아직 없다 (사용자 결정 2026-10-24, 나중에 추가).
+ * 같은 PR은 하나로 합친다. 허용 저장소 걸러내기는 쓰는 쪽에서 isRepositoryAllowed로 한다 (D-36).
  */
 export function extractPrLinks(text: string): { owner: string; name: string; prNumber: number; url: string }[] {
   const out = new Map<string, { owner: string; name: string; prNumber: number; url: string }>();

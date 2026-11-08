@@ -57,7 +57,7 @@
 | `eureka.reconcile` | `EurekaAdapter.reconcile(ActionRequest)` | `action.result`. 조회만, 재전송 없음 |
 | `eureka.reminders` | `EurekaAdapter.reminders()` | `eureka.reminders.result` `{items, skipped, completeness, observedAt}` |
 | `eureka.reminder` | `EurekaAdapter.reminder(itemId)` | `eureka.reminder.result` `{item | null}` |
-| `eureka.links` (P-19, 문서에 없음) | — | `eureka.links.result` PrLinkLookup `{itemId, itemName, status, links[], observedAt}` |
+| `eureka.links` (P-19, 문서에 없음) | — | `eureka.links.result` PrLinkLookup `{itemId, itemName, status, links[], excludedCount?, observedAt}` |
 
 문서를 따른 부분: 입력·결과 형식, 리마인더는 설명(`description`)과 시간대가 붙은 실제 마감(`dueAt`)만 쓰고 설명이 없으면 업무명으로 대체하지 않고 뺀다 (interface-contracts §9), 쓰기 응답 유실은 `unknown`.
 
@@ -70,7 +70,7 @@
 | P-16 | 결과 문장 | `facts.resultText`에 고정 문장. 파이프라인은 출력 모델의 `requiredText`로 쓴다 |
 | P-17 | 리마인더 형식 | `{itemId, reminderKey(itemId:dueAt), name, description, dueAt(+09:00), timezone, state}`. 24시간 필터·주기·중복 방지는 파이프라인 담당(문서) |
 | P-18 | 등록 프로세스 | `.env` `EUREKA_DEFAULT_PROCESS_ID` 또는 `task` 헤드 값과 이름이 같은 프로세스. 둘 다 없으면 등록하지 않음 |
-| P-19 | 업무 → PR 연결 | Eureka에는 PR 필드가 없어, **단계 기록(note)** 본문의 `https://github.com/{owner}/{repo}/pull/{번호}`로 연결한다. `eureka.links {requestId, itemId}`가 기록이 있는 단계만 `GET /_api_/notes/0/list?sites&detail=true&stageId=`로 읽는다. 결과 `status`: `linked`(PR·단계 조합 1개) / `ambiguous`(2개 이상, 추측 안 함) / `none` / `partial`(일부 기록 조회 실패) / `failed` / `not_found`. 기록 원문은 결과에 넣지 않는다. 파이프라인은 `links[0]`으로 `resolvedTarget`(github_pr)과 `taskRefs`(`itemId`, 기록이 붙은 `stageId`)를 채워 `harness.run`을 보낸다 (서버 `harnessContextFromLink`). 허용 저장소 목록·작성자 제한은 아직 없음 (사용자 결정 2026-10-24, 나중에 추가) |
+| P-19 | 업무 → PR 연결 | Eureka에는 PR 필드가 없어, **단계 기록(note)** 본문의 `https://github.com/{owner}/{repo}/pull/{번호}`로 연결한다. `eureka.links {requestId, itemId}`가 기록이 있는 단계만 `GET /_api_/notes/0/list?sites&detail=true&stageId=`로 읽는다. 결과 `status`: `linked`(PR·단계 조합 1개) / `ambiguous`(2개 이상, 추측 안 함) / `none` / `partial`(일부 기록 조회 실패) / `failed` / `not_found`. 기록 원문은 결과에 넣지 않는다. 파이프라인은 `links[0]`으로 `resolvedTarget`(github_pr)과 `taskRefs`(`itemId`, 기록이 붙은 `stageId`)를 채워 `harness.run`을 보낸다 (서버 `harnessContextFromLink`). 허용 저장소 목록·작성자 제한은 아직 없음 (사용자 결정 2026-10-24, 나중에 추가) 허용 저장소 목록(`DESKPET_ALLOWED_REPOS`, D-36)이 있으면 목록 밖 저장소 PR 주소는 후보에서 빼고 `excludedCount`로만 알린다 |
 
 Eureka 쓰기는 서버에서 계속 꺼져 있다 (`allowWrites=false`). 승인돼도 "쓰기가 꺼져 있어서 … 보내지 않았어요"로 끝난다. 실제 개발 환경 Eureka에는 `description` 필드가 없어서(C-08) 지금은 리마인더 대상이 0건일 수 있다 — `pnpm smoke eureka`로 확인.
 

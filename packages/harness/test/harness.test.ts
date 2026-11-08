@@ -8,6 +8,9 @@ describe('input policy', () => {
     expect(writeInputBlockers(voiceTurn('t', '승인해', { stt: 0.5 }), DEFAULT_POLICY)).toContain('stt_confidence_low');
     expect(writeInputBlockers(voiceTurn('t', '승인해', { stt: 'unavailable' }), DEFAULT_POLICY)).toContain('stt_confidence_unavailable');
     expect(writeInputBlockers(voiceTurn('t', '승인해', { stt: 0.99, routeConfidence: 0.4 }), DEFAULT_POLICY)).toEqual(['route_confidence_low']);
+    // 2026-11-08: 라우터 통합 신뢰도 0.53 이상이면 통과
+    expect(writeInputBlockers(voiceTurn('t', '승인해', { stt: 0.99, routeConfidence: 0.53 }), DEFAULT_POLICY)).toEqual([]);
+    expect(writeInputBlockers(voiceTurn('t', '승인해', { stt: 0.99, routeConfidence: 0.52 }), DEFAULT_POLICY)).toEqual(['route_confidence_low']);
     expect(writeInputBlockers(voiceTurn('t', '승인해', { isFinal: false }), DEFAULT_POLICY)).toContain('turn_not_final');
     expect(writeInputBlockers(webTurn('t', '승인'), DEFAULT_POLICY)).toEqual([]);
   });
@@ -16,6 +19,9 @@ describe('input policy', () => {
     expect(classifyAnswer(voiceTurn('t', '응, 승인해'), DEFAULT_POLICY).verdict).toBe('approved');
     expect(classifyAnswer(voiceTurn('t', '아니, 보류해'), DEFAULT_POLICY).verdict).toBe('rejected');
     expect(classifyAnswer(voiceTurn('t', '음… 글쎄'), DEFAULT_POLICY).verdict).toBe('unclear');
+    expect(classifyAnswer(voiceTurn('t', '반영해'), DEFAULT_POLICY).verdict).toBe('approved');
+    expect(classifyAnswer(voiceTurn('t', 'Eureka에도 반영해 줘'), DEFAULT_POLICY).verdict).toBe('approved');
+    expect(classifyAnswer(voiceTurn('t', '반영하지 마'), DEFAULT_POLICY).verdict).toBe('rejected');
     expect(classifyAnswer(voiceTurn('t', '응 승인해', { stt: 0.4 }), DEFAULT_POLICY).verdict).toBe('unclear');
   });
 });

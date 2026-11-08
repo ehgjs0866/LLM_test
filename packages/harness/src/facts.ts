@@ -47,7 +47,7 @@ export interface ReviewFacts {
   approvalWarnings: string[];
 }
 
-export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string, opts: { ignoreChecks?: boolean } = {}): ReviewFacts {
+export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string, opts: { ignoreChecks?: boolean; repositoryAllowed?: boolean } = {}): ReviewFacts {
   const head = ctx.initialHeadSha;
   const sections: ReviewFacts['sections'] = {};
   for (const s of ctx.sections) {
@@ -123,6 +123,7 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string, opts: 
       viewerPermission: (ctx.viewer?.permission as ViewerPermission | undefined) ?? 'unknown',
       ...(ctx.viewer ? { viewerLogin: ctx.viewer.login } : {}),
       ...(opts.ignoreChecks ? { ignoreChecks: true } : {}),
+      ...(opts.repositoryAllowed === false ? { repositoryAllowed: false } : {}),
     });
     if (ctx.consistency === 'changed' && !f.approvalBlockers.includes('sha_changed')) f.approvalBlockers.push('sha_changed');
     f.approvalWarnings = approvalWarnings(checks?.sectionKind === 'checks' ? checks.data : undefined);

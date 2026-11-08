@@ -15,6 +15,7 @@ import {
   type LinkedPr,
   type PrLinkLookup,
   extractPrLinks,
+  isRepositoryAllowed,
 } from '@deskpet/contracts';
 import { createHash } from 'node:crypto';
 import type { EurekaGateway } from '@deskpet/gateways';
@@ -55,6 +56,8 @@ export interface EurekaBridgeDeps {
   holderId?: string;
   /** 업무 등록에 쓸 기본 프로세스(템플릿) ID. 없으면 task 헤드 값과 이름이 같은 프로세스를 찾는다 */
   defaultProcessId?: string;
+  /** 허용 저장소 목록 `owner/name` (D-36). 목록 밖 PR 주소는 연결 후보에서 뺀다. 없거나 비면 제한 없음 */
+  allowedRepositories?: string[];
   timezone?: string;
 }
 
@@ -234,7 +237,7 @@ export class EurekaBridge {
    * 업무 단계 기록(note)에 적힌 GitHub PR 주소로 연결된 PR을 찾는다 (G-01 시작부, P-19).
    * - 기록 본문은 PR 주소만 뽑고 버린다. 결과에 원문을 넣지 않는다
    * - 서로 다른 (PR, 단계)가 둘 이상이면 ambiguous: 추측하지 않는다. 일부 기록을 못 읽으면 partial
-   * - 허용 저장소 목록·작성자 제한은 아직 없다 (사용자 결정 2026-10-24: 나중에 추가)
+   * - 허용 저장소 목록(D-36)에 없는 PR 주소는 후보에서 빼고 excludedCount로만 알린다. 작성자 제한은 아직 없다
    */
   async links(itemId: string, deadlineAt: string): Promise<PrLinkLookup> {
     const c = { deadlineAt };
@@ -244,6 +247,7 @@ export class EurekaBridge {
     if (!item) return { itemId, status: list.data!.completeness === 'complete' ? 'not_found' : 'partial', links: [], observedAt: list.data!.observedAt };
     const found = new Map<string, LinkedPr>();
     let incomplete = false;
+    let excluded = 0;
     for (const st of item.stages) {
       if (!st.noteIds?.length) continue;
       const notes = await this.d.eureka.listStageNotes({ stageId: st.stageId }, c);
@@ -254,6 +258,10 @@ export class EurekaBridge {
       if (notes.data!.completeness !== 'complete') incomplete = true;
       for (const n of notes.data!.notes)
         for (const l of extractPrLinks(n.content)) {
+          if (!isRepositoryAllowed(this.d.allowedRepositories, l.owner, l.name)) {
+            excluded++;
+            continue;
+          }
           const key = `${l.owner.toLowerCase()}/${l.name.toLowerCase()}#${l.prNumber}@${st.stageId}`;
           if (!found.has(key))
             found.set(key, { repository: { owner: l.owner, name: l.name }, prNumber: l.prNumber, url: l.url, itemId, stageId: st.stageId, stageName: st.name, stageStatus: st.status, noteId: n.noteId });
@@ -261,7 +269,7 @@ export class EurekaBridge {
     }
     const links = [...found.values()];
     const status = links.length > 1 ? 'ambiguous' : incomplete ? 'partial' : links.length === 1 ? 'linked' : 'none';
-    return { itemId, itemName: item.name, status, links, observedAt: this.d.clock.nowIso() };
+    return { itemId, itemName: item.name, status, links, ...(excluded > 0 ? { excludedCount: excluded } : {}), observedAt: this.d.clock.nowIso() };
   }
 
   // ============================================================== reads

@@ -48,13 +48,18 @@ export interface PolicyConfig {
    * GitHub Gateway의 checksPolicy와 같은 값으로 둔다. 기본 'enforce'(라이브러리). 서버는 DESKPET_PR_CHECKS=enforce가 아니면 skip
    */
   prChecks: 'enforce' | 'skip';
+  /**
+   * 승인할 수 있는 저장소 목록 `owner/name` (D-36, D-21 보안 보류분). 없거나 비면 제한 없음.
+   * 목록 밖 저장소 PR은 리뷰(읽기)는 하지만 승인 질문을 만들지 않는다. 서버는 DESKPET_ALLOWED_REPOS로 정한다
+   */
+  allowedRepositories?: string[];
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
   policyVersion: 'policy-0.1',
   checkRuleVersion: 'rules-0.1',
   minSttConfidenceForWrite: 0.85,
-  minRouteConfidenceForWrite: 0.8,
+  minRouteConfidenceForWrite: 0.53, // 2026-11-08 사용자 결정: 라우터 통합 신뢰도 0.53 이상이면 통과 (실증값으로 다시 조정)
   confirmationTtlMs: 2 * 60_000,
   clarificationTtlMs: 5 * 60_000,
   maxGuideSteps: 6,
