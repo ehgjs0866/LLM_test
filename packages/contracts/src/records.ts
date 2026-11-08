@@ -42,6 +42,8 @@ export const ProvisionalErrorCode = z.enum([
   'GITHUB_RESULT_UNKNOWN',
   'GITHUB_TRANSIENT',
   'EUREKA_INPUT_INVALID',
+  // wiki interface-contracts 2026-11-01: 라우터의 24개 Eureka Operation 중 아직 실행하지 않는 동작 (성공으로 보고하지 않음)
+  'EUREKA_OPERATION_NOT_IMPLEMENTED',
   'EUREKA_SERVER_ERROR',
   'EUREKA_TRANSIENT',
   'POLICY_BLOCKED',
@@ -91,7 +93,7 @@ export const ActionResult = z
     error: ErrorInfo.optional(),
   })
   .superRefine((r, ctx) => {
-    const isWrite = ['submit_approval', 'complete_stage', 'register_item', 'postpone_item', 'complete_item'].includes(
+    const isWrite = ['submit_approval', 'complete_stage', 'register_item', 'postpone_item', 'complete_item', 'add_stage_note'].includes(
       r.action,
     );
     if (isWrite && r.status === 'succeeded' && r.externalRefs.length === 0) {

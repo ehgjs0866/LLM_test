@@ -102,6 +102,8 @@ export const TaskSummary = z.object({
   dueAtMs: z.number().int().optional(),
   dueAt: UtcTimestamp.optional(),
   priority: z.string().optional(),
+  /** 마지막 수정 시각. 다른 사용자가 바꾼 업무인지 볼 때 쓴다 (시나리오 "다른 사용자가 수정한 업무", 2026-11-08) */
+  updatedAt: UtcTimestamp.optional(),
   computedState: ItemState,
   stages: z.array(TaskStage),
 });

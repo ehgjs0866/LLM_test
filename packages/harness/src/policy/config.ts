@@ -43,6 +43,11 @@ export interface PolicyConfig {
    * 승인은 여전히 확인 질문을 거친다. 기본 false(라이브러리). 서버는 DESKPET_INTENT_RECHECK=off가 아니면 켠다
    */
   intentRecheck: boolean;
+  /**
+   * PR CI 검사 처리 (D-30). 'skip'이면 리뷰·승인 전 확인에서 검사를 조회하지 않고 승인 조건에서도 뺀다.
+   * GitHub Gateway의 checksPolicy와 같은 값으로 둔다. 기본 'enforce'(라이브러리). 서버는 DESKPET_PR_CHECKS=enforce가 아니면 skip
+   */
+  prChecks: 'enforce' | 'skip';
 }
 
 export const DEFAULT_POLICY: PolicyConfig = {
@@ -64,4 +69,5 @@ export const DEFAULT_POLICY: PolicyConfig = {
   followUpReplyWaitMs: 3_000,
   evidenceNote: false,
   intentRecheck: false,
+  prChecks: 'enforce',
 };

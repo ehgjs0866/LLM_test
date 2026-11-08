@@ -11,10 +11,13 @@ interface ReviewFactsLike {
   headSha?: string;
   consistency?: string;
   changes?: { fileCount: number; additions: number; deletions: number };
-  checks?: { requiredState: string; required?: string[]; requiredSource?: string; requiredReasonCode?: string; failing: string[]; pending: string[] };
+  checks?: { requiredState: string; required?: string[]; requiredSource?: string; requiredReasonCode?: string; failing: string[]; pending: string[]; runs?: unknown[] };
   approvalWarnings?: string[];
   copilot?: { status: string; comments: unknown[]; blockingComments: number; commentCoverage?: string };
 }
+
+/** 미지원 요청 공통 문장. 실행하지 않았다는 사실, 지원 범위, 대안을 함께 말한다 */
+export const UNSUPPORTED_SENTENCE = '그 요청은 실행하지 않았어요. 지금은 GitHub PR 리뷰와 승인, Eureka 업무 조회·등록·기한 변경·완료를 도와드릴 수 있어요. 이 중에서 필요한 걸 말씀해 주세요.';
 
 export function fallbackText(req: OutputRequest): { text: string; displayText: string; emotion: Emotion } {
   const f = req.facts;
@@ -27,7 +30,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
   // 파이프라인 문서 경계(output.generate): 기준 문장을 그대로 고정 문구로 쓴다
   if (typeof f['baseText'] === 'string' && f['baseText']) {
     const st = req.actionResults[0]?.status;
-    const e: Emotion = req.purpose === 'question' ? 'thinking' : st === 'unknown' ? 'concerned' : st === 'failed' ? 'apologetic' : 'neutral';
+    const e: Emotion = req.purpose === 'question' ? 'neutral' : st === 'succeeded' ? 'happy' : st === 'failed' ? 'sad' : 'neutral';
     return { text: f['baseText'], displayText: typeof f['baseDisplayText'] === 'string' ? f['baseDisplayText'] : f['baseText'], emotion: e };
   }
 
@@ -44,7 +47,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
   if (f['processingErrors'] && (f['processingErrors'] as string[]).length > 0 && f['disposition'] === 'failed') {
     parts.push('요청을 처리하지 못했어요. 외부 작업은 실행하지 않았어요.');
     display.push('처리 실패 · 외부 변경 없음');
-    emotion = 'apologetic';
+    emotion = 'sad';
   }
 
   // ---------------------------------------------------------------- 리뷰 요약
@@ -54,19 +57,19 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
   } else if (f['reviewError'] === 'sensor_assessment_pending' && !approval) {
     parts.push('PR 정보는 받았지만 검사 판정을 끝내지 못했어요. 확인되지 않은 내용으로는 진행하지 않을게요.');
     display.push('PR 조회 판정 대기');
-    emotion = 'concerned';
+    emotion = 'neutral';
   } else if (f['reviewError'] && !approval) {
     const auth = String(f['reviewError']).includes('AUTH');
     parts.push(auth ? 'GitHub 권한 문제로 PR을 확인하지 못했어요. PR과 Eureka 상태는 변경되지 않았어요.' : 'PR 정보를 가져오지 못했어요. 잠시 후 다시 확인할게요.');
     display.push('PR 조회 실패');
-    emotion = 'apologetic';
+    emotion = 'sad';
   }
 
   // ---------------------------------------------------------------- 차단
   if (blocked && !f['reviewError']) {
     parts.push(blockedSentence(blocked.reasons, review?.prNumber, review));
     display.push(`차단: ${blocked.reasons.join(', ')}`);
-    emotion = 'concerned';
+    emotion = 'neutral';
   }
 
   // ---------------------------------------------------------------- 판정 대기 (센서 오류)
@@ -80,7 +83,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
         : `${what}은 보냈지만 결과 판정을 아직 끝내지 못했어요. 다시 보내지 않고 기록으로 다시 확인할게요.`,
     );
     display.push(`${pendingAssess.action === 'submit_approval' ? 'GitHub 승인' : 'Eureka 반영'} 판정 대기`);
-    emotion = 'concerned';
+    emotion = 'neutral';
   }
 
   // ---------------------------------------------------------------- 승인 결과
@@ -89,11 +92,11 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     if (approval.status === 'succeeded') {
       parts.push(`PR ${t}번을 승인했어요.`);
       display.push(`GitHub 승인 성공 (review ${approval.externalRefs[0]?.id ?? '-'})`);
-      emotion = 'cheerful';
+      emotion = 'happy';
     } else {
       parts.push(approvalFailure(approval, t));
       display.push(isWritesDisabled(approval) ? 'GitHub 승인 미전송 (쓰기 비활성)' : `GitHub 승인 ${statusKo(approval.status)}`);
-      emotion = approval.status === 'unknown' ? 'concerned' : 'apologetic';
+      emotion = approval.status === 'unknown' ? 'neutral' : 'sad';
     }
     const fu = f['followUp'] as { eligibility: string; conditions?: string[] } | undefined;
     if (approval.status === 'succeeded' && fu && fu.eligibility !== 'eligible' && fu.eligibility !== 'not_applicable') {
@@ -108,7 +111,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     if (stage.status === 'succeeded') {
       parts.push(`Eureka의 '${name}' 단계를 완료로 반영했어요.`);
       display.push('Eureka 반영 성공');
-      emotion = 'cheerful';
+      emotion = 'happy';
       // 완료 근거 기록 (D-28)
       const note = (f['stageCompletion'] as { evidenceNote?: { status?: string } } | undefined)?.evidenceNote;
       const noteMsg: Record<string, [string, string]> = {
@@ -126,7 +129,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     } else if (stage.status === 'unknown') {
       parts.push(`Eureka 반영 결과를 아직 확인하지 못했어요. 다시 실행하지 않고 상태를 확인할게요.`);
       display.push('Eureka 반영 결과 미확인');
-      emotion = 'concerned';
+      emotion = 'neutral';
     } else if (isWritesDisabled(stage)) {
       parts.push('쓰기가 꺼져 있어서 Eureka 반영 요청은 보내지 않았어요.');
       display.push('Eureka 쓰기 비활성');
@@ -134,7 +137,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
       const policyBlocked = stage.dispatchState === 'not_sent' && stage.error?.provisionalCode !== undefined && ['POLICY_BLOCKED', 'SHA_CHANGED'].includes(stage.error.provisionalCode);
       parts.push(`Eureka 반영은 하지 못했어요. GitHub 승인은 그대로 유지돼요.${policyBlocked ? '' : " 'Eureka 다시 반영해줘'라고 하시면 다시 시도할게요."}`);
       display.push(`Eureka 반영 ${statusKo(stage.status)}`);
-      emotion = 'apologetic';
+      emotion = 'sad';
     }
   } else {
     // 잠깐 기다리는 동안 끝나지 않음 (D-23): 끝나면 알림으로 다시 말한다
@@ -160,7 +163,7 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     const m = msg[retry.status] ?? ['Eureka 반영을 다시 하지 않았어요.', '실행 없음'];
     parts.push(m[0]);
     display.push(m[1]);
-    emotion = retry.status === 'already_done' ? 'neutral' : 'concerned';
+    emotion = 'neutral';
   }
 
   // ---------------------------------------------------------------- 거절·답변
@@ -182,7 +185,6 @@ export function fallbackText(req: OutputRequest): { text: string; displayText: s
     if (warn) parts.push(warn);
     parts.push(questionSentence(question, review?.prNumber ?? question.target?.prNumber));
     display.push('답변 대기');
-    if (emotion === 'neutral') emotion = 'thinking';
   }
 
   if (f['backgroundNotFound'] && req.purpose !== 'question') {
@@ -222,7 +224,9 @@ function reviewSentence(r: ReviewFactsLike): string {
     if (reqFail.length) s.push(`필수 검사가 실패했어요: ${reqFail.join(', ')}.`);
     if (otherFail.length) s.push(c.requiredState === 'unknown' ? `실패한 검사가 있어요: ${otherFail.join(', ')}.` : `필수는 아니지만 실패한 검사가 있어요: ${otherFail.join(', ')}.`);
     if (c.pending.length) s.push(`아직 진행 중인 검사가 있어요: ${c.pending.join(', ')}.`);
-    if (!c.failing.length && !c.pending.length) s.push('모든 검사가 통과했어요.');
+    // 실행된 검사가 하나도 없으면 '통과'라고 말하지 않는다 (wiki deskpet-pipeline 10/27 미수정 항목)
+    if (c.runs && c.runs.length === 0 && !c.failing.length && !c.pending.length) s.push('이 커밋에서 실행된 검사는 없어요.');
+    else if (!c.failing.length && !c.pending.length) s.push('모든 검사가 통과했어요.');
     if (c.requiredSource === 'deskpet_config') s.push('필수 검사 기준은 GitHub 대신 DeskPet 설정을 썼어요.');
   }
   if (r.copilot) {
@@ -253,7 +257,8 @@ function blockedSentence(reasons: string[], pr?: number, review?: ReviewFactsLik
   if (reasons.includes('required_checks_partially_verified')) return '필수 검사 설정을 일부만 확인할 수 있어서 승인하지 않았어요.';
   if (reasons.some((r) => r.startsWith('permission'))) return '승인 권한을 확인할 수 없어서 승인하지 않았어요.';
   if (reasons.includes('llm_unavailable')) return '판단을 도와주는 모델에게서 지금 쓸 수 있는 답을 받지 못해 처리하지 못했어요. 외부 작업은 하지 않았어요. 잠시 후 다시 말씀해 주세요.';
-  if (reasons.some((r) => r.startsWith('unsupported_intent'))) return '그 요청은 아직 처리할 수 없어요.';
+  // 미지원 응답 방식 (wiki deskpet-operation-policies §3): 실행하지 않았음 → 지원 범위 → 대안
+  if (reasons.some((r) => r.startsWith('unsupported_intent'))) return UNSUPPORTED_SENTENCE;
   return `조건이 맞지 않아 실행하지 않았어요 (${reasons.join(', ')}).`;
 }
 

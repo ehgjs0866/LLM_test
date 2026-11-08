@@ -173,7 +173,7 @@ async function llmCheck() {
       instructions: OUTPUT_INSTRUCTIONS,
       prompt: ['목적: result', '필수 포함: (없음)', '작업 상태: get_review_context=succeeded', '기준 문장: PR 1번, 현재 커밋 abc1234 기준이에요. 파일 1개가 바뀌었어요.', '기준 화면 문장: PR 1 @abc1234', '허용 표정: neutral, cheerful', '최대 길이: 200자'].join('\n'),
       maxChars: 200,
-      allowedEmotions: ['neutral', 'cheerful'],
+      allowedEmotions: ['neutral', 'happy', 'sad'],
       deadlineMs: 15_000,
     });
     ok(`출력 문장: "${d.text}" / 화면 "${d.displayText}" / ${d.emotion} (${Date.now() - t1}ms)`);

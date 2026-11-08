@@ -115,9 +115,13 @@ export class PipelineBridge {
   }
 
   /** generate와 같고 출력 모델 호출 시간(modelMs)도 돌려준다 (NFR-01, D-26) */
-  async generateDetailed(o: PipelineOutputRequest): Promise<{ text: string; modelMs?: number }> {
+  async generateDetailed(o: PipelineOutputRequest): Promise<{ text: string; displayText?: string; emotion?: 'neutral' | 'happy' | 'sad'; actionStatus?: 'succeeded' | 'failed' | 'unknown'; modelMs?: number }> {
     const st = o.action?.status;
-    if (st && st !== 'succeeded' && st !== 'needs_clarification') return { text: o.requiredText };
+    // 화면 계약(D-32): 쓰기 작업 결과(dispatchState가 있는 결과)만 actionStatus로 주고, 감정은 결과에 맞춘다
+    const wrote = !!o.action?.facts[K.dispatchState];
+    const actionStatus = wrote && (st === 'succeeded' || st === 'failed' || st === 'unknown') ? st : undefined;
+    const emotionFor = (e: 'neutral' | 'happy' | 'sad') => (actionStatus === 'succeeded' ? 'happy' : actionStatus === 'failed' ? 'sad' : actionStatus === 'unknown' ? 'neutral' : e);
+    if (st && st !== 'succeeded' && st !== 'needs_clarification') return { text: o.requiredText, emotion: emotionFor(st === 'failed' ? 'sad' : 'neutral'), ...(actionStatus ? { actionStatus } : {}) };
     const reminder = ReminderPayload.safeParse(o.reminder);
     const tokens = (o.action?.facts[K.requiredMeaning] ?? '').split('\n').filter(Boolean);
     const pendingId = o.action?.facts[K.pendingId];
@@ -131,12 +135,12 @@ export class PipelineBridge {
       sources: [],
       // 고정 범위 문구가 있으면 그것을, 없으면 기준 문장 전체를 지킨다
       requiredMeaning: reminder.success ? [] : tokens.length ? tokens : [o.requiredText],
-      constraints: { language: 'ko-KR', maxSpeechChars: Math.max(220, o.requiredText.length + 60), allowedEmotions: ['neutral', 'cheerful', 'concerned', 'thinking', 'apologetic'] },
+      constraints: { language: 'ko-KR', maxSpeechChars: Math.max(220, o.requiredText.length + 60), allowedEmotions: ['neutral', 'happy', 'sad'] },
       ...(isQuestion ? { pendingId } : {}),
       ...(reminder.success ? { reminder: reminder.data } : {}),
     };
     const c = await this.d.output.generate(req);
-    return { text: c.text, ...(c.modelMs !== undefined ? { modelMs: c.modelMs } : {}) };
+    return { text: c.text, displayText: c.displayText, emotion: emotionFor(c.emotion), ...(actionStatus ? { actionStatus } : {}), ...(c.modelMs !== undefined ? { modelMs: c.modelMs } : {}) };
   }
 
   // ============================================================= mapping
@@ -173,6 +177,12 @@ export class PipelineBridge {
     if (review?.headSha) facts['headSha'] = review.headSha;
     const blocked = r.facts['blocked'] as { reasons?: string[] } | undefined;
     if (blocked?.reasons?.length) facts['blockedReasons'] = blocked.reasons.join(',');
+    // 확인 답변을 승인으로 받지 않은 이유 (예: input not acceptable for approval: stt_confidence_low / pipeline did not mark … mutationApproved=false)
+    const unclear = r.facts['unclearAnswer'] as { reason?: string } | undefined;
+    if (unclear?.reason) facts['unclearAnswerReason'] = unclear.reason;
+    // 승인 뒤 Eureka 반영을 건너뛰거나 보류한 이유 (예: no_linked_eureka_stage, sha_changed_since_approval)
+    const fu = r.facts['followUp'] as { eligibility?: string; reason?: string; conditions?: string[] } | undefined;
+    if (fu?.eligibility && fu.eligibility !== 'eligible') facts['followUp'] = [fu.eligibility, fu.reason, ...(fu.conditions ?? [])].filter(Boolean).join(',');
     // D-23: 응답 뒤에도 진행 중인 Eureka 반영 — 끝나면 서버 notice로 결과가 온다
     const sc = r.facts['stageCompletion'] as { status?: string; operationId?: string } | undefined;
     if (sc?.status === 'in_progress') {

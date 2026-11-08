@@ -60,6 +60,9 @@ export interface HarnessWsServerOptions {
   maxPendingEvents?: number;
   now?: () => number;
   log?: (line: string) => void;
+  /** 파이프라인 연결이 없을 때 보관할 알림 수·기간. 기본 50건·10분 */
+  maxHeldNotices?: number;
+  heldNoticeTtlMs?: number;
   /** 요청 하나를 끝낼 때마다 (처리 시간 기록용, NFR-01) */
   onCompleted?: (info: { kind: string; requestId: string; ms: number; ok: boolean; payload?: unknown }) => void;
 }
@@ -95,6 +98,7 @@ export class HarnessWsServer {
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly laneInFlight: Record<Lane, number> = { work: 0, eureka: 0, control: 0 };
   private readonly replies = new Map<string, CachedReply>();
+  private readonly heldNotices: { notice: unknown; resultText: string; at: number }[] = [];
   private readonly tokenDigest: Buffer;
   private readonly viewerDigest?: Buffer;
   private readonly epoch = Date.now();
@@ -222,7 +226,9 @@ export class HarnessWsServer {
       }
       conn.role = frame.role;
       this.log(`연결 #${conn.id} 인증됨 (${frame.role}${frame.client ? `, ${frame.client}` : ''})`);
-      return this.send(conn, { type: 'welcome', protocol: PROTOCOL, schemaVersion: `${SUPPORTED_MAJOR}.0`, role: frame.role, epoch: this.epoch, serverTime: new Date().toISOString() });
+      this.send(conn, { type: 'welcome', protocol: PROTOCOL, schemaVersion: `${SUPPORTED_MAJOR}.0`, role: frame.role, epoch: this.epoch, serverTime: new Date().toISOString() });
+      if (frame.role === 'pipeline') this.flushHeldNotices(conn);
+      return;
     }
 
     switch (frame.type) {
@@ -356,7 +362,33 @@ export class HarnessWsServer {
       this.send(conn, { type: 'notice', notice, resultText });
       sent += 1;
     }
+    // 받을 파이프라인 연결이 없으면 보관했다가 다음 pipeline 연결에 순서대로 보낸다 (2026-11-08).
+    // 개수·기간 상한이 있고, 한 번 보낸 알림은 지운다. 오래된 알림의 적용 여부는 파이프라인이 requestId로 판단한다
+    if (sent === 0) {
+      this.heldNotices.push({ notice, resultText, at: Date.now() });
+      const max = this.o.maxHeldNotices ?? 50;
+      if (this.heldNotices.length > max) this.heldNotices.splice(0, this.heldNotices.length - max);
+    }
     return sent;
+  }
+
+  /** 보관 중인 알림 수 (진단·테스트용) */
+  heldNoticeCount(): number {
+    this.dropExpiredNotices();
+    return this.heldNotices.length;
+  }
+
+  private dropExpiredNotices() {
+    const ttl = this.o.heldNoticeTtlMs ?? 10 * 60_000;
+    const now = Date.now();
+    while (this.heldNotices.length && now - this.heldNotices[0]!.at > ttl) this.heldNotices.shift();
+  }
+
+  private flushHeldNotices(conn: Conn) {
+    this.dropExpiredNotices();
+    const items = this.heldNotices.splice(0);
+    for (const h of items) this.send(conn, { type: 'notice', notice: h.notice, resultText: h.resultText, held: true });
+    if (items.length) this.log(`보관한 알림 ${items.length}건 전달 #${conn.id}`);
   }
 
   // -------------------------------------------------------------------- output

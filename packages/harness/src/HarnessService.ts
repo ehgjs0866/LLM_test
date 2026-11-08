@@ -354,8 +354,14 @@ export class HarnessService {
 
   private async followUpAfterRecovery(op: OperationRecord, approval: ActionResult, facts: Record<string, unknown>): Promise<HarnessResult> {
     const plain = (followUp: Record<string, unknown>): HarnessResult => ({ requestId: op.requestId, disposition: 'completed', actionResults: [approval], facts: { ...facts, followUp }, sources: [], processingErrors: [] });
-    const linked = op.actualRequest['linkedStage'] as TaskRef | undefined;
-    if (!linked?.stageId) return plain({ eligibility: 'not_applicable', reason: 'no_linked_eureka_stage' });
+    let linked = op.actualRequest['linkedStage'] as TaskRef | undefined;
+    if (!linked?.stageId) {
+      // 승인 때 업무 연결이 없었으면 단계 기록에서 직접 찾는다 (2026-11-08, 읽기만)
+      const found = await this.findLinkedStage(op.target as GitHubPrTarget, new Date(this.d.clock.nowMs() + 30_000).toISOString());
+      if (found.status !== 'linked') return plain({ eligibility: 'not_applicable', reason: found.status === 'none' ? 'no_linked_eureka_stage' : `linked_stage_${found.status}` });
+      linked = found.ref;
+    }
+    const linkedStageId = linked.stageId!;
     // 이미 후속 작업이 있거나 질문을 기다리는 중이면 새로 묻지 않는다
     const existing = (await this.d.store.listOperations(op.requestId)).find((o) => o.action === 'complete_stage' && o.actualRequest['approvalOperationId'] === op.operationId);
     if (existing) return plain({ eligibility: 'not_applicable', reason: 'followup_operation_exists', operationId: existing.operationId });
@@ -365,7 +371,7 @@ export class HarnessService {
     const t = op.target as GitHubPrTarget;
     // Eureka 기록 확인: 기록에서 찾은 연결이면 그 기록에 PR 주소가 아직 있는지 본다 (지워졌으면 묻지 않음)
     if (linked.source.ref.includes('note:') && this.d.eureka.listStageNotes) {
-      const notes = await this.d.eureka.listStageNotes({ stageId: linked.stageId }, { deadlineAt });
+      const notes = await this.d.eureka.listStageNotes({ stageId: linkedStageId }, { deadlineAt });
       if (!notes.ok) return plain({ eligibility: 'unverified', conditions: ['eureka_notes_unverified'] });
       const still = notes.data!.notes.some((n) => extractPrLinks(n.content).some((l) => l.prNumber === t.prNumber && l.owner.toLowerCase() === t.repository.owner.toLowerCase() && l.name.toLowerCase() === t.repository.name.toLowerCase()));
       if (!still) return plain({ eligibility: 'blocked', conditions: ['eureka_note_link_removed'] });
@@ -803,7 +809,7 @@ export class HarnessService {
       { repository: a.repository, prNumber: a.prNumber, requestedSections: a.requestedSections, ...(a.expectedHeadSha ? { expectedHeadSha: a.expectedHeadSha } : {}), deadlineAt: constraints.deadlineAt },
       { deadlineAt: constraints.deadlineAt, signal: meta.abort.signal },
     );
-    const facts = ctx.prBasics ? reviewFacts(ctx, purpose === 'approval_precheck' ? (a.expectedHeadSha ?? ctx.initialHeadSha) : undefined) : undefined;
+    const facts = ctx.prBasics ? reviewFacts(ctx, purpose === 'approval_precheck' ? (a.expectedHeadSha ?? ctx.initialHeadSha) : undefined, { ignoreChecks: this.cfg.prChecks === 'skip' }) : undefined;
     const g: GatewayResult = {
       mode: 'read',
       dispatchState: 'sent',
@@ -864,12 +870,19 @@ export class HarnessService {
    */
   private async followUpAfterApproval(meta: RequestMeta, approvalOp: OperationRecord, approval: ActionResult, constraints: ExecutionConstraints, facts: Record<string, unknown>): Promise<HarnessResult> {
     const t = approvalOp.target as GitHubPrTarget;
-    const ref = meta.taskRefs.find((r) => r.stageId && r.prNumber === t.prNumber && r.repository?.owner === t.repository.owner && r.repository?.name === t.repository.name);
+    let ref = meta.taskRefs.find((r) => r.stageId && r.prNumber === t.prNumber && r.repository?.owner === t.repository.owner && r.repository?.name === t.repository.name);
     if (!ref || !ref.stageId) {
-      return this.result(meta, 'completed', [approval], { ...facts, followUp: { eligibility: 'not_applicable', reason: 'no_linked_eureka_stage' } });
+      // 파이프라인이 업무 연결(taskRefs)을 주지 않았으면 Eureka 단계 기록에서 이 PR 주소를 직접 찾는다 (2026-11-08, 읽기만)
+      const found = await this.findLinkedStage(t, constraints.deadlineAt);
+      if (found.status !== 'linked') {
+        return this.result(meta, 'completed', [approval], { ...facts, followUp: { eligibility: 'not_applicable', reason: found.status === 'none' ? 'no_linked_eureka_stage' : `linked_stage_${found.status}` } });
+      }
+      ref = found.ref;
+      meta.taskRefs = [...meta.taskRefs, ref];
     }
+    const stageId = ref.stageId!;
     const approvedSha = String(approvalOp.actualRequest['commitId']);
-    const check = await this.followUpEligibility(t, approvedSha, ref.itemId, ref.stageId, constraints);
+    const check = await this.followUpEligibility(t, approvedSha, ref.itemId, stageId, constraints);
     await this.d.store.appendEvidence(approvalOp.operationId, {
       attemptId: approvalOp.attempts[approvalOp.attempts.length - 1]!.attemptId,
       followUp: { eligibility: check.eligibility, conditions: check.conditions, evidence: check.evidence, observedAt: this.d.clock.nowIso() },
@@ -880,7 +893,7 @@ export class HarnessService {
     const reviewId = approval.externalRefs.find((r) => r.kind === 'pull_request_review')?.id ?? '';
     const scope: ConfirmationScope = {
       action: 'complete_stage',
-      target: { kind: 'eureka_stage', itemId: ref.itemId, stageId: ref.stageId },
+      target: { kind: 'eureka_stage', itemId: ref.itemId, stageId },
       exactChange: {
         status: 'done',
         approvalOperationId: approvalOp.operationId,
@@ -978,6 +991,34 @@ export class HarnessService {
     return this.result(meta, 'completed', [actionResult], {
       stageCompletion: { status: actionResult.status, itemId: t.itemId, stageId: t.stageId, stageName: ar0['stageName'], dispatchState: actionResult.dispatchState, ...(note ? { evidenceNote: note } : {}) },
     });
+  }
+
+  /**
+   * 승인한 PR과 연결된 Eureka 단계를 단계 기록(note)의 PR 주소로 찾는다 (D-21과 같은 규칙, 읽기만).
+   * - 열린 업무의 미완료 단계 중 기록이 있는 것만, 최대 20개 단계까지 읽는다
+   * - 정확히 한 단계면 linked. 둘 이상이면 ambiguous, 일부 기록을 못 읽었거나 상한에 걸리면 partial — 둘 다 추측하지 않는다
+   */
+  private async findLinkedStage(t: GitHubPrTarget, deadlineAt: string): Promise<{ status: 'linked'; ref: TaskRef } | { status: 'none' | 'ambiguous' | 'partial' | 'failed' }> {
+    const read = this.d.eureka.listStageNotes?.bind(this.d.eureka);
+    if (!read) return { status: 'none' };
+    const c = { deadlineAt };
+    const list = await this.d.eureka.listTasks({ onlyOpen: true, limit: 100 }, c);
+    if (!list.ok) return { status: 'failed' };
+    const stages = list.data!.items.flatMap((i) => i.stages.filter((st) => st.noteIds?.length && st.status !== 'done' && st.status !== 'skip').map((st) => ({ item: i, st })));
+    let incomplete = list.data!.completeness !== 'complete' || stages.length > 20;
+    const hits: TaskRef[] = [];
+    for (const { item, st } of stages.slice(0, 20)) {
+      const notes = await read({ stageId: st.stageId }, c);
+      if (!notes.ok || notes.data!.completeness !== 'complete') {
+        incomplete = true;
+        continue;
+      }
+      const note = notes.data!.notes.find((n) => extractPrLinks(n.content).some((l) => l.prNumber === t.prNumber && l.owner.toLowerCase() === t.repository.owner.toLowerCase() && l.name.toLowerCase() === t.repository.name.toLowerCase()));
+      if (note) hits.push({ itemId: item.itemId, stageId: st.stageId, repository: { ...t.repository }, prNumber: t.prNumber, source: { kind: 'eureka', ref: `item:${item.itemId}/stage:${st.stageId}/note:${note.noteId}` } });
+    }
+    if (hits.length > 1) return { status: 'ambiguous' };
+    if (incomplete) return { status: 'partial' };
+    return hits.length === 1 ? { status: 'linked', ref: hits[0]! } : { status: 'none' };
   }
 
   /** 단계 완료 확인 질문에 완료 근거 기록(D-28)을 함께 묻는지. 켜져 있고 Gateway가 기록 작성을 지원할 때만 */

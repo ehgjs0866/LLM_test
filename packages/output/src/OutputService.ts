@@ -6,6 +6,10 @@ import {
   mentionedIdentifiers,
   type AllowedIdentifiers,
   type ConfirmationScope,
+  WRITE_ACTIONS as ALL_WRITE_ACTIONS,
+  normalizeEmotion,
+  type ActionResult,
+  type DisplayActionStatus,
   type Emotion,
   type OutputContent,
   type OutputRequest,
@@ -48,6 +52,14 @@ export class OutputService {
   constructor(private readonly o: OutputServiceOptions = {}) {}
 
   async generate(raw: OutputRequest): Promise<OutputContent> {
+    const out = await this.generateInner(raw);
+    // 화면 계약(deskpet-display-interface): 업무 결과는 actionStatus로, 감정은 결과와 모순되지 않게 맞춘다
+    const st = displayActionStatus(OutputRequestSchema.parse(raw).actionResults);
+    const emotion: Emotion = st === 'succeeded' ? 'happy' : st === 'failed' ? 'sad' : st === 'unknown' ? 'neutral' : out.emotion;
+    return { ...out, emotion, ...(st ? { actionStatus: st } : {}) };
+  }
+
+  private async generateInner(raw: OutputRequest): Promise<OutputContent> {
     const req = OutputRequestSchema.parse(raw);
     const statuses = req.actionResults.map((a) => ({ operationId: a.operationId, status: a.status }));
     const fb = this.fallback(req.facts, req);
@@ -69,7 +81,9 @@ export class OutputService {
           }),
           this.o.modelTimeoutMs ?? 5_000,
         );
-        const emotion = req.constraints.allowedEmotions.includes(draft.emotion as Emotion) ? (draft.emotion as Emotion) : fb.emotion;
+        // 모델이 다른 감정 이름을 내면 지원 값으로 정규화한다 (cheerful → happy 등)
+        const norm = normalizeEmotion(draft.emotion);
+        const emotion = req.constraints.allowedEmotions.includes(norm) ? norm : fb.emotion;
         // 모델이 화면 문장을 냈으면 그것도 같은 기준으로 검사한다. 내지 않았으면 고정 화면 문장을 쓴다
         const failures = this.validate({ text: draft.text, ...(draft.displayText !== undefined ? { displayText: draft.displayText } : {}) }, req);
         if (failures.length === 0) {
@@ -98,6 +112,16 @@ export class OutputService {
     const fb = fallbackText(req);
     return { outputId: req.outputId, text: fb.text, displayText: fb.displayText, emotion: req.constraints.allowedEmotions.includes(fb.emotion) ? fb.emotion : 'neutral' };
   }
+}
+
+/**
+ * 화면용 대표 업무 결과: 마지막 쓰기 작업의 결과. 조회만 했거나 취소면 생략한다
+ * (조회 성공을 업무 성공 표정으로 보이지 않게, 결과 없는 진행·질문에 결과 값을 넣지 않게)
+ */
+function displayActionStatus(rs: ActionResult[]): DisplayActionStatus | undefined {
+  const writes = rs.filter((a) => ALL_WRITE_ACTIONS.has(a.action));
+  const a = writes[writes.length - 1];
+  return a && a.status !== 'cancelled' ? a.status : undefined;
 }
 
 function checkSurface(raw: string, req: OutputRequest): string[] {

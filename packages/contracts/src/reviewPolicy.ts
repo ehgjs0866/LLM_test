@@ -13,6 +13,11 @@ export interface ApprovalCheckInput {
   expectedHeadSha: string;
   viewerLogin?: string;
   viewerPermission: ViewerPermission;
+  /**
+   * true면 CI 검사(필수 검사 포함)를 승인 조건에서 뺀다. 검사 조회 자체도 하지 않는 운영 설정에서 쓴다
+   * (사용자 결정 2026-11-03, README D-30). PR 상태·SHA·권한·본인 PR 조건은 그대로 검사한다
+   */
+  ignoreChecks?: boolean;
 }
 
 type CheckRun = ChecksData['runs'][number];
@@ -52,6 +57,7 @@ export function approvalBlockers(i: ApprovalCheckInput): string[] {
   if (i.viewerPermission === 'unknown') out.push('permission_unverified');
   else if (!['admin', 'maintain', 'write'].includes(i.viewerPermission)) out.push('permission_insufficient');
   if (i.viewerLogin && i.viewerLogin === i.pr.author) out.push('cannot_approve_own_pr');
+  if (i.ignoreChecks) return out;
   if (!i.checks) {
     out.push('checks_unavailable');
     return out;

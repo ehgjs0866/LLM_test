@@ -35,7 +35,7 @@ export function createWorld(opts: { githubMode?: 'rest' | 'mcp'; config?: Partia
       { id: STAGE_ID, name: 'PR 승인', status: 'doing', order: 2 },
     ],
   });
-  const githubGw = new GitHubReviewGateway({ transport: github, now: () => clock.nowMs(), ...(opts.requiredChecksFallback ? { requiredChecksFallback: opts.requiredChecksFallback } : {}), ...(opts.operatorConfirm ? { operatorConfirm: opts.operatorConfirm } : {}) });
+  const githubGw = new GitHubReviewGateway({ transport: github, now: () => clock.nowMs(), ...(config.prChecks === 'skip' ? { checksPolicy: 'skip' as const } : {}), ...(opts.requiredChecksFallback ? { requiredChecksFallback: opts.requiredChecksFallback } : {}), ...(opts.operatorConfirm ? { operatorConfirm: opts.operatorConfirm } : {}) });
   const eurekaGw = new EurekaGateway({ http: eurekaServer, now: () => clock.nowMs(), allowWrites: true });
   const makeHarness = () => new HarnessService({ store, github: githubGw, eureka: eurekaGw, clock, ids, config, ...(opts.sensor ? { sensor: opts.sensor } : {}), ...(opts.llm ? { llm: opts.llm } : {}), ...(opts.wiki ? { wiki: opts.wiki } : {}), ...(opts.onFollowUp ? { onFollowUp: opts.onFollowUp } : {}) });
   let harness = makeHarness();

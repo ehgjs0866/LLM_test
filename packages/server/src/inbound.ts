@@ -28,7 +28,7 @@ export class DirectHarnessInbound implements HarnessInbound {
     this.kinds = new Set([
       ...base,
       ...(d.bridge ? ['harness.run', 'harness.reconcile', 'output.generate'] : []),
-      ...(d.eurekaBridge ? ['eureka.execute', 'eureka.reconcile', 'eureka.reminders', 'eureka.reminder', 'eureka.links'] : []),
+      ...(d.eurekaBridge ? EUREKA_KINDS : []),
     ]);
   }
 
@@ -56,27 +56,51 @@ export class DirectHarnessInbound implements HarnessInbound {
         if (!this.d.bridge) throw new UnsupportedKindError(env.kind);
         return { kind: 'output.text', payload: await this.d.bridge.generateDetailed(env.payload as Envelope<'output.generate'>['payload']) };
       case 'eureka.execute':
-        if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
-        return { kind: 'action.result', payload: await this.d.eurekaBridge.execute(env.payload as Envelope<'eureka.execute'>['payload']) };
       case 'eureka.reconcile':
-        if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
-        return { kind: 'action.result', payload: await this.d.eurekaBridge.reconcile(env.payload as Envelope<'eureka.reconcile'>['payload']) };
       case 'eureka.reminders':
+      case 'eureka.reminder':
+      case 'eureka.links':
         if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
-        return { kind: 'eureka.reminders.result', payload: await this.d.eurekaBridge.reminders(readDeadline(env)) };
-      case 'eureka.reminder': {
-        if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
-        const p = env.payload as Envelope<'eureka.reminder'>['payload'];
-        return { kind: 'eureka.reminder.result', payload: { item: await this.d.eurekaBridge.reminder(p.itemId, readDeadline(env)) } };
-      }
-      case 'eureka.links': {
-        if (!this.d.eurekaBridge) throw new UnsupportedKindError(env.kind);
-        const p = env.payload as Envelope<'eureka.links'>['payload'];
-        return { kind: 'eureka.links.result', payload: await this.d.eurekaBridge.links(p.itemId, readDeadline(env)) };
-      }
+        return dispatchEureka(this.d.eurekaBridge, env);
       default:
         throw new UnsupportedKindError(env.kind);
     }
+  }
+}
+
+export const EUREKA_KINDS = ['eureka.execute', 'eureka.reconcile', 'eureka.reminders', 'eureka.reminder', 'eureka.links'] as const;
+
+/**
+ * Eureka 전용 입구 (wiki deskpet-pipeline §4 "Eureka 내부 API 분리"). Harness와 다른 프로세스에서 직접 Eureka 요청만 받는다.
+ * 같은 deskpet.harness.v1 봉투·메시지 형식을 그대로 쓰므로 파이프라인은 주소(포트)만 바꾸면 된다.
+ */
+export class EurekaInbound implements HarnessInbound {
+  readonly kinds: ReadonlySet<string> = new Set(EUREKA_KINDS);
+  constructor(private readonly bridge: EurekaBridge) {}
+  dispatch(env: Envelope): Promise<InboundReply> {
+    if (!this.kinds.has(env.kind)) throw new UnsupportedKindError(env.kind);
+    return dispatchEureka(this.bridge, env);
+  }
+}
+
+async function dispatchEureka(bridge: EurekaBridge, env: Envelope): Promise<InboundReply> {
+  switch (env.kind) {
+    case 'eureka.execute':
+      return { kind: 'action.result', payload: await bridge.execute(env.payload as Envelope<'eureka.execute'>['payload']) };
+    case 'eureka.reconcile':
+      return { kind: 'action.result', payload: await bridge.reconcile(env.payload as Envelope<'eureka.reconcile'>['payload']) };
+    case 'eureka.reminders':
+      return { kind: 'eureka.reminders.result', payload: await bridge.reminders(readDeadline(env)) };
+    case 'eureka.reminder': {
+      const p = env.payload as Envelope<'eureka.reminder'>['payload'];
+      return { kind: 'eureka.reminder.result', payload: { item: await bridge.reminder(p.itemId, readDeadline(env)) } };
+    }
+    case 'eureka.links': {
+      const p = env.payload as Envelope<'eureka.links'>['payload'];
+      return { kind: 'eureka.links.result', payload: await bridge.links(p.itemId, readDeadline(env)) };
+    }
+    default:
+      throw new UnsupportedKindError(env.kind);
   }
 }
 

@@ -131,7 +131,7 @@ export class EurekaGateway implements EurekaGatewayPort {
    */
   async listStageNotes(query: { stageId: string; limit?: number }, c: CallConstraints): Promise<ReadOutcome<StageNoteList>> {
     const res = await this.read(
-      { method: 'GET', path: '/_api_/notes/0/list', query: { sites: '', detail: 'true', stageId: query.stageId, limit: String(query.limit ?? 50) } },
+      { method: 'GET', path: '/_api_/notes/0/list', query: { sites: '', detail: 'true', stageId: query.stageId, limit: String(query.limit ?? 100) } },
       c,
     );
     if (!res.ok) return { ok: false, result: res.result };
@@ -470,6 +470,7 @@ export function normalizeItem(raw: unknown): TaskSummary {
     ...(typeof r['description'] === 'string' ? { description: r['description'] } : {}),
     ...(dueAtMs !== undefined ? { dueAtMs, dueAt: new Date(dueAtMs).toISOString() } : {}),
     ...(typeof r['priority'] === 'string' ? { priority: r['priority'] } : {}),
+    ...(typeof r['updatedAt'] === 'number' && r['updatedAt'] > 0 ? { updatedAt: new Date(r['updatedAt']).toISOString() } : {}),
     computedState: computeItemState(r['status'], stages),
     stages,
   };

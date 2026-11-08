@@ -5,7 +5,7 @@
  *   pnpm harness                          # 쓰기 비활성 (GitHub 승인·Eureka 완료 요청은 보내지 않음)
  *   pnpm harness --allow-github-writes    # GitHub 승인 쓰기 허용. 승인은 요청 쪽(사용자 확인 질문·답변)에서만 받는다 (D-22).
  *                                         # DESKPET_STORE_PATH(영속 저장소) 필수. 같은 DB는 한 프로세스만 연다 (<DB>.lock)
- *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발 환경 flw-d1만). 영속 저장소 필수
+ *   pnpm harness --allow-eureka-writes    # Eureka 쓰기 허용 (개발판 flw-d1·운영판 flw-v1). 영속 저장소 필수
  *   pnpm harness … --poc                  # POC 장애 주입 (DESKPET_POC_FAULTS, scripts/poc-faults.ts, D-27)
  *
  * .env
@@ -85,6 +85,7 @@ const config = {
   ...DEFAULT_POLICY,
   evidenceNote,
   intentRecheck,
+  prChecks: 'enforce' as 'enforce' | 'skip',
   ...(guideTimeout > 0 ? { llmGuideTimeoutMs: guideTimeout } : {}),
   ...(minStt !== undefined ? { minSttConfidenceForWrite: minStt } : {}),
   ...(minRoute !== undefined ? { minRouteConfidenceForWrite: minRoute } : {}),
@@ -101,9 +102,11 @@ const storePath = env['DESKPET_STORE_PATH']?.trim();
 // 쓰기 모드는 영속 저장소가 있어야 한다: 메모리 저장소는 재시작 뒤 '보냈을 수 있는' 승인을 기억하지 못해 중복 전송을 막지 못한다 (감사 F-04)
 if (allowGithubWrites && !storePath) fail('--allow-github-writes는 DESKPET_STORE_PATH(영속 저장소)가 있어야 켤 수 있어요');
 if (allowEurekaWrites && !storePath) fail('--allow-eureka-writes는 DESKPET_STORE_PATH(영속 저장소)가 있어야 켤 수 있어요');
-// Eureka 쓰기는 개발 환경(flw-d1)에서만 허용한다 (사용자 결정: 개발 환경부터)
+// Eureka 쓰기는 개발판(flw-d1)과 운영판(flw-v1)에서 허용한다. 운영판도 배포 전 닫힌 시험 환경이다 (사용자 결정 2026-11-03, D-20 갱신)
+// 그 밖의 주소(오타·다른 서버)에는 쓰지 않는다
 const eurekaBase = env['EUREKA_BASE_URL']?.trim() || 'https://api.eureka.codes/flw-d1';
-if (allowEurekaWrites && !/\/flw-d1\/?$/.test(eurekaBase)) fail(`--allow-eureka-writes는 개발 환경(flw-d1)에서만 켤 수 있어요 (지금: ${eurekaBase})`);
+const eurekaEnv = /\/flw-d1\/?$/.test(eurekaBase) ? '개발판 flw-d1' : /\/flw-v1\/?$/.test(eurekaBase) ? '운영판 flw-v1' : undefined;
+if (allowEurekaWrites && !eurekaEnv) fail(`--allow-eureka-writes는 Eureka 개발판(flw-d1)·운영판(flw-v1) 주소에서만 켤 수 있어요 (지금: ${eurekaBase})`);
 const openStore = (): InMemoryOperationStore => {
   try {
     return storePath ? InMemoryOperationStore.openDurable(storePath, storeOpts) : new InMemoryOperationStore(storeOpts);
@@ -125,11 +128,15 @@ const poc = (() => {
     return fail(e instanceof Error ? e.message : String(e));
   }
 })();
+// PR CI 검사 (D-30): 기본은 조회하지 않고 승인 조건에서도 뺀다 (사용자 결정 2026-11-03). enforce로 되돌린다
+const prChecks: 'enforce' | 'skip' = (env['DESKPET_PR_CHECKS'] ?? 'skip').trim().toLowerCase() === 'enforce' ? 'enforce' : 'skip';
 const github = new GitHubReviewGateway({
   transport: new RestGitHubTransport({ token: githubToken, allowWrites: allowGithubWrites, limiter: githubLimiter, ...(poc.githubFetch ? { fetchImpl: poc.githubFetch } : {}) }),
   now: () => Date.now(),
   requiredChecksFallback: parseRequiredChecksFallback(env['DESKPET_REQUIRED_CHECKS']),
+  checksPolicy: prChecks,
 });
+config.prChecks = prChecks;
 const eureka = createEurekaRestGateway(env, poc.eurekaFetch, { allowWrites: allowEurekaWrites, limiter: eurekaLimiter });
 const llm = createLlmFromEnv(env);
 // LLM Wiki (D-19): vault 루트 경로. 없으면 Wiki 검색을 하지 않는다
@@ -143,13 +150,17 @@ const recovery = new RecoveryWorker({ harness, store, clock: systemClock, interv
 const output = new OutputService(llm.outputModel ? { model: llm.outputModel, ...(llm.outputTimeoutMs ? { modelTimeoutMs: llm.outputTimeoutMs } : {}) } : {});
 
 const pipelineBridge = new PipelineBridge({ harness, store, output });
+// 직접 Eureka 요청을 별도 프로세스(pnpm eureka:server, D-31)로 옮겼으면 이 서버는 eureka.*를 받지 않는다 (기록 권위를 한 곳에)
+const eurekaBridgeMode = (env['DESKPET_EUREKA_BRIDGE'] ?? 'internal').trim().toLowerCase() === 'external' ? 'external' : 'internal';
 const server = new HarnessWsServer({
   // 파이프라인 문서 형식(harness.run 등)도 같은 서버에서 받는다 (docs/pipeline-bridge.md)
   inbound: new DirectHarnessInbound({
     harness,
     output,
     bridge: pipelineBridge,
-    eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }),
+    ...(eurekaBridgeMode === 'internal'
+      ? { eurekaBridge: new EurekaBridge({ eureka, store, clock: systemClock, holderId: `server-${process.pid}-eureka`, ...(env['EUREKA_DEFAULT_PROCESS_ID']?.trim() ? { defaultProcessId: env['EUREKA_DEFAULT_PROCESS_ID'].trim() } : {}) }) }
+      : {}),
   }),
   store,
   token,
@@ -171,17 +182,19 @@ notify = (n) => {
     .catch(() => undefined)
     .then((p) => {
       const sent = server.notify({ ...n, ...(p ? { pipelineAction: p.action, pipelineQuestion: p.question } : {}) }, text);
-      console.log(`[notice] ${n.source} ${n.action} → ${n.status}${sent ? '' : ' (연결된 파이프라인 없음)'}: ${text}`);
+      console.log(`[notice] ${n.source} ${n.action} → ${n.status}${sent ? '' : ' (연결된 파이프라인 없음 → 보관, 다음 연결 때 전달)'}: ${text}`);
     });
 };
 
 async function main() {
   console.log('DeskPet Harness 서버');
   for (const l of poc.banner) console.log(l);
+  console.log(`직접 Eureka 요청(eureka.*): ${eurekaBridgeMode === 'internal' ? '이 서버에서 받음' : '받지 않음 — Eureka 내부 API 서버(pnpm eureka:server)로 (DESKPET_EUREKA_BRIDGE=external)'}`);
+  console.log(`PR 검사(D-30): ${prChecks === 'skip' ? '조회하지 않음 — 승인 조건에서도 제외 (DESKPET_PR_CHECKS=enforce로 되돌림)' : '조회·필수 검사 확인'}`);
   console.log(`쓰기 입력 신뢰도 기준: STT ${config.minSttConfidenceForWrite}${minStt !== undefined ? ' (.env로 바꿈)' : ''}, 라우터 ${config.minRouteConfidenceForWrite}${minRoute !== undefined ? ' (.env로 바꿈)' : ''}`);
   console.log(`2차 의도 확인(D-29): ${intentRecheck ? (llm.guideClient ? '켜짐 — llm·unclear 요청을 LLM이 다시 보고 PR 리뷰·승인이면 규칙 경로로' : '켜져 있지만 LLM 없음 (동작 안 함)') : '꺼짐 (DESKPET_INTENT_RECHECK=off)'}`);
   console.log(`완료 근거 기록(D-28): ${evidenceNote ? `켜짐 — 단계 완료 확인에 함께 묻고 단계 기록에 PR 주소를 남김${env['EUREKA_NOTE_ACTOR_ID']?.trim() ? ' (작성자 actorId 지정)' : ' (작성자 actorId 없음)'}` : '꺼짐 (EUREKA_EVIDENCE_NOTE=off)'}`);
-  console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (사용자 확인 답변만으로 보냄)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaBase} (사용자 확인 답변만으로 보냄)` : '꺼짐'}`);
+  console.log(`GitHub 쓰기: ${allowGithubWrites ? '허용 (사용자 확인 답변만으로 보냄)' : '꺼짐'}  /  Eureka 쓰기: ${allowEurekaWrites ? `허용 — ${eurekaEnv} ${eurekaBase} (사용자 확인 답변만으로 보냄)` : '꺼짐'}`);
   console.log(llm.enabled ? `LLM: ${llm.provider} / ${llm.model} (동시 ${llm.limiter?.stats().max ?? '-'}건)` : `LLM 꺼짐 (${llm.reason})`);
   console.log(`동시 호출 상한: GitHub ${githubLimiter.stats().max} / Eureka ${eurekaLimiter.stats().max} (D-24)`);
   if (lan) {
@@ -254,5 +267,16 @@ function timingDetail(p: unknown): string {
   const parts: string[] = [];
   if (t?.stages?.length) parts.push(summarizeTimings(t.stages));
   if (typeof o.modelMs === 'number') parts.push(`llm.output ${o.modelMs}ms`);
+  // 왜 멈췄는지도 한 줄에 (값에 비밀값 없음: 사유 코드·LLM 오류 코드만)
+  const f = (o.facts ?? o.action?.facts ?? {}) as Record<string, unknown>;
+  const why = (x: unknown) => (typeof x === 'string' ? x : x && typeof x === 'object' ? JSON.stringify(x) : '');
+  const unclear = (f['unclearAnswer'] as { reason?: string } | undefined)?.reason ?? f['unclearAnswerReason'];
+  if (unclear) parts.push(`답변 불명확: ${why(unclear)}`);
+  const blocked = (f['blocked'] as { reasons?: string[] } | undefined)?.reasons?.join(',') ?? f['blockedReasons'];
+  if (blocked) parts.push(`차단: ${why(blocked)}`);
+  const ir = f['intentRecheck'] as { from?: string; to?: string; error?: string } | undefined;
+  if (ir) parts.push(`의도 재확인: ${ir.from}→${ir.to}${ir.error ? ` (${ir.error})` : ''}`);
+  const fu = f['followUp'];
+  if (fu && (typeof fu === 'string' || (fu as { eligibility?: string }).eligibility !== 'eligible')) parts.push(`Eureka 후속: ${why(fu)}`);
   return parts.length ? ` — ${parts.join(', ')}` : '';
 }

@@ -48,10 +48,17 @@ export class LlmGuide implements Guide {
 
     // 모델이 응답하지 않거나 형식이 틀리면 '처리할 수 없는 요청'이 아니라 '지금 판단 모델을 쓸 수 없음'으로 구분한다.
     // 이미 PR 자료를 모았으면 그 사실로 답한다
-    const llmDown = (why: string): GuideDecision =>
-      (input.facts as GuideFacts).review
-        ? { ...base, reasonRefs: [...base.reasonRefs, why, 'partial_answer'], kind: 'finish', payload: { reason: 'answer_from_facts', outputFactRefs: ['review'] } }
-        : { ...base, kind: 'blocked', reasonRefs: [...base.reasonRefs, why], payload: { unmetConditions: ['llm_unavailable'], unknownEvidence: [], requiredUserOrSystemAction: 'system' } };
+    const llmDown = (why: string): GuideDecision => {
+      if ((input.facts as GuideFacts).review) {
+        return { ...base, reasonRefs: [...base.reasonRefs, why, 'partial_answer'], kind: 'finish', payload: { reason: 'answer_from_facts', outputFactRefs: ['review'] } };
+      }
+      // 판단 모델이 없어도 "그 PR 확인해 줘" 같은 읽기 요청은 처리한다 (wiki operation-policies: 로컬·고정 경로로 전환).
+      // 대상 PR이 있고 읽기 말이 있으며 승인·병합 말이 없을 때만. 쓰기는 이 경로로 가지 않는다 (2026-11-08)
+      if (reviewFallbackAllowed(input)) {
+        return this.toDecision({ decision: 'read_pr', missingSlots: [], reason: 'llm unavailable: read-only review fallback' }, input, { ...base, reasonRefs: [...base.reasonRefs, why, 'fallback_review'] }, blocked, () => undefined);
+      }
+      return { ...base, kind: 'blocked', reasonRefs: [...base.reasonRefs, why], payload: { unmetConditions: ['llm_unavailable', `reason:${why}`], unknownEvidence: [], requiredUserOrSystemAction: 'system' } };
+    };
 
     const facts0 = input.facts as GuideFacts;
     // PR 자료와 Wiki 검색까지 끝났으면, 배경을 못 찾았더라도 차단하지 않고 가진 사실로 답한다
@@ -139,6 +146,16 @@ export class LlmGuide implements Guide {
     this.calls.set(requestId, count);
     if (this.calls.size > 1_000) this.calls.delete(this.calls.keys().next().value!);
   }
+}
+
+const READ_WORDS = /(리뷰|확인|내용|변경|바뀌|요약|살펴|읽어|review|summar)/i;
+const WRITE_WORDS = /(승인|approve|머지|merge|병합|닫아|close|삭제|완료)/i;
+
+/** LLM 장애 때 읽기 전용 리뷰로 대신 처리해도 되는 요청인지 */
+export function reviewFallbackAllowed(input: GuideInput): boolean {
+  const t = input.context.packet.target;
+  const text = input.goal.currentTurn.rawText;
+  return t?.kind === 'github_pr' && READ_WORDS.test(text) && !WRITE_WORDS.test(text);
 }
 
 /** LLM 입력: 의도·발화·대상 식별자·수집 여부만. PR 내용·업무 설명·외부 응답 원문은 넣지 않는다 */

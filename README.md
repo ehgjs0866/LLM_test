@@ -59,6 +59,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm check` | vitest / tsc(패키지 + 웹) / eslint / 셋 다 |
 | `pnpm smoke [eureka\|github\|llm]` | 연결 테스트. Eureka·GitHub는 읽기만, llm은 작은 호출 2번 |
 | `pnpm harness [--allow-github-writes]` | Harness 서버. 시작 시 보존 정리·결과 불명 쓰기 읽기 확인, Ctrl+C 시 처리 중 요청을 마치고 종료 |
+| `pnpm eureka:server [--allow-eureka-writes]` | Eureka 내부 API 서버 (D-31, 기본 ws://127.0.0.1:8789). 직접 Eureka 요청(`eureka.*`)만 별도 프로세스에서 받는다. Harness 서버는 `DESKPET_EUREKA_BRIDGE=external`로 켠다 |
 | `pnpm demo:adapter [--fixture] <명령>` | 파이프라인 문서 형식(adapter) 시험 클라이언트: `reminders`, `reminder <itemId>`, `eureka list`, `eureka status "업무"`, `eureka postpone "업무" <ISO+09:00> [--approve]`, `links <itemId>`, `harness [PR] [--item <itemId>]`. `--fixture`는 `pnpm web:fixture` 서버(가짜 GitHub·Eureka)에 붙음 |
 | `pnpm demo --ask "Eureka 다시 반영해줘" --intent eureka.retry` | 실패한 Eureka 반영 다시 하기 (D-23) |
 | `pnpm demo --item <itemId>` | 데모를 Eureka 업무에서 시작: 단계 기록의 PR 주소로 대상 PR과 완료할 단계를 찾는다 (`.env` `DEMO_EUREKA_*`·PR 번호 불필요) |
@@ -93,7 +94,7 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
   - 보내기 직전 Gateway가 PR 상태·head SHA·권한·필수 검사를 다시 확인하고, 어긋나면 보내지 않는다.
 - 확인 질문의 답은 **실제로 전달한 문장**이 저장된 범위(저장소·PR·커밋·행위)와 맞을 때만 받는다. 출력 모델은 이 범위 문구를 바꿀 수 없고, 성공하지 않은 쓰기 결과는 모델 문장 없이 고정 문장으로만 알린다.
 - 봉투 deadline이 지났거나 봉투·payload의 요청 ID가 다르면 실행하지 않는다.
-- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발 환경(flw-d1)에서만 보낼 수 있다 (D-20). 보내기 직전 단계 상태(이미 완료·보류)를 다시 확인한다.
+- Eureka 쓰기는 `pnpm harness --allow-eureka-writes`일 때만, 개발판(flw-d1)·운영판(flw-v1) 주소에서만 보낼 수 있다 (D-20, 2026-11-03 운영판 추가). 보내기 직전 단계 상태(이미 완료·보류)를 다시 확인한다.
 - 본인이 연 PR은 GitHub 규칙상 승인할 수 없어 확인 질문 전에 막힌다.
 
 ## 실제 연결 기록
@@ -138,8 +139,13 @@ pnpm web:dev             # 터미널 3: 웹 화면 http://127.0.0.1:5173 (보기
 | D-16 | 투영 snapshot 범위는 source 전체로 제한 (vault message-contracts에 사용자 요청으로 한 문장 추가) | 사용자 결정 2026-10-05 |
 | D-17 | 웹 화면은 보기 전용. 서버의 viewer 전용 토큰으로만 접속하고 변경 기능은 없다 (`docs/web-ui.md`) | 구현 |
 | D-18 | GitHub 쓰기는 서버 실행 옵션 `--allow-github-writes`일 때만. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-05, 2026-10-24 갱신 |
-| D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발 환경(flw-d1)에서만**. 영속 저장소 필수. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-12 (실제 시험 허락) |
+| D-20 | Eureka 쓰기는 `--allow-eureka-writes`일 때만, **개발판(flw-d1)·운영판(flw-v1) 주소에서만** (운영판도 배포 전 닫힌 시험 환경, 2026-11-03 추가). 그 밖의 주소는 거부. 영속 저장소 필수. (콘솔 `yes` 확인은 D-22로 없앰) | 사용자 결정 2026-10-12, 2026-11-03 갱신 |
 | D-29 | **2차 의도 확인**: 라우터가 `llm`·`unclear` 같은 일반 의도로 보낸 요청은 LLM이 한 번 더 보고(`intent-v1`, 선택지 pr_review·pr_approve·other) PR 리뷰·승인이면 규칙 Guide 경로로 보낸다. LLM은 의도 이름만 고르고 대상·실행은 정하지 않는다. 승인은 그대로 승인 전 검사 → 확인 질문 → "응"이 있어야 실행되고, 쓰기 입력 신뢰도 기준(STT 0.85·라우터 0.8)도 그대로. 실패·other면 원래 의도로 기존 LLM Guide 경로. 결과는 `facts.intentRecheck`. LLM Guide가 막으면 진짜 이유를 `reason:<why>`로 함께 남긴다. `DESKPET_INTENT_RECHECK=off`로 끄고, 신뢰도 기준은 `DESKPET_MIN_STT_CONFIDENCE`·`DESKPET_MIN_ROUTE_CONFIDENCE`로 바꿀 수 있다(비우면 기본값) | 사용자 결정 2026-11-02 (시연) |
+| D-34 | **하네스 내부 보완 (2026-11-08, wiki 대조 후 바로 할 수 있는 것)**: ① `eureka.reconcile`은 `operationId`가 정확히 맞는 기록만(다른 작업 결과로 대신하지 않음) ② 같은 `operationId`로 다른 Eureka 요청이 오면 `OPERATION_ID_REUSED`로 거절 ③ 업무 등록 결과에 `facts.itemId` ④ 단계 기록 추가 응답 유실 시 결과 조회가 같은 내용의 기록을 후보로 찾음(다시 보내지 않음) ⑤ `taskRefs`가 없으면 승인 뒤 단계 기록에서 PR 주소로 연결 단계를 찾음(한 곳만, 모호·일부 실패면 추측 안 함) ⑥ LLM 장애 때 대상 PR이 있는 읽기 요청은 리뷰(읽기)만 대신 처리(승인·병합 말이 있으면 안 함, wiki operation-policies "고정 경로로 전환") ⑦ 파이프라인 미연결 때 알림 보관(50건·10분) 후 다음 연결에 전달 ⑧ 업무 `updatedAt` 보존 ⑨ 단계 기록 조회 상한 100건 | 구현 2026-11-08 |
+| D-33 | **라우터 헤드 의미 (wiki interface-contracts 2026-11-01)**: 새 형식(`modelIntention` 헤드가 있음)에서 `target` = 업무 이름 원문, `name` = 단계 이름 원문, `task` = 새 업무 이름·요약, `note` = 기록 내용. 업무는 `target`(또는 `resolvedTarget`)으로 찾고, 단계 기록 추가의 단계는 `name`, 등록할 업무 이름은 `task`(없으면 `target`)로 정한다. 업무 유형은 `EUREKA_DEFAULT_PROCESS_ID`만 쓴다. 구형 형식(`modelIntention` 없음)은 지금처럼 `name` = 업무 이름. 라우터 24개 라벨 중 아직 실행하지 않는 동작은 `EUREKA_OPERATION_NOT_IMPLEMENTED`(목록에 없는 값은 `POLICY_BLOCKED`) | 구현 2026-11-03 |
+| D-32 | **wiki 정렬 (2026-11-03)**: ① 출력 감정은 `neutral`·`happy`·`sad`만 쓰고(모델이 다른 이름을 내면 정규화), 업무 결과는 `OutputContent.actionStatus`(마지막 쓰기 작업의 succeeded·failed·unknown, 조회만 했으면 없음)로 따로 준다. 결과가 있으면 감정을 결과에 맞춘다(성공 happy, 실패 sad, 미확인 neutral) — wiki deskpet-display-interface ② 실행된 검사가 없으면 "모든 검사가 통과"라고 하지 않는다 ③ 미지원 요청은 "실행하지 않음 → 지원 범위 → 대안" 순서로 답한다 — wiki deskpet-operation-policies §3 ④ EurekaBridge는 라우터 형식(intention=`eureka` + operation 24개 라벨)을 받는다. 지원: query(대상 있으면 상태, 없으면 목록)·create·complete·postpone·add_note(단계 기록 추가, 확인 후)·query_processes. 나머지 라벨은 실행하지 않고 무엇을 안 했는지·지원 범위를 말한다 — wiki small-router-model | 구현 2026-11-03 |
+| D-31 | **Eureka 내부 API 분리**: `pnpm eureka:server`가 직접 Eureka 요청(`eureka.execute·reconcile·reminders·reminder·links`)만 별도 프로세스·포트(기본 8789)에서 받는다. 메시지 형식은 Harness 서버와 같아 파이프라인은 주소만 바꾼다. 작업 기록은 따로(`EUREKA_STORE_PATH`, Harness 저장소와 다른 파일). Harness 서버는 `DESKPET_EUREKA_BRIDGE=external`이면 `eureka.*`를 받지 않는다(기본 internal: 지금처럼 함께). G-01의 단계 완료는 계속 Harness가 직접 쓴다 — wiki deskpet-pipeline §4 | 구현 2026-11-03 |
+| D-30 | **PR CI 검사 조회 생략**: 서버 기본 `DESKPET_PR_CHECKS=skip` — 리뷰·승인 전 확인에서 검사(check runs·필수 검사 설정)를 조회하지 않고 승인 조건에서도 뺀다. PR 상태·SHA·권한·본인 PR 조건은 그대로. `enforce`로 되돌린다(라이브러리 기본 enforce). Liability 문서의 승인 조건 1번(필수 검사 확인)과 다르다 → vault 반영 필요 | 사용자 결정 2026-11-03 (wiki deskpet-pipeline 10/27 요청) |
 | D-28 | **완료 근거 기록**: Eureka 단계 완료가 성공하면 그 단계 기록(note)에 `[DeskPet 완료 근거] <PR 주소> 승인 후 단계 완료 (커밋 7자리, 리뷰 ID)`를 남긴다. API `POST /_api_/stages/{stageId}/note {content, actorId?}` (PDF에 없음, 2026-11-01 웹 요청으로 확인). 동의는 단계 완료 확인 질문에 함께 받는다("…완료로 반영하고, 승인한 PR 주소를 단계 기록에 추가할까요?"). 쓰기 전에 기록을 읽어 같은 PR·커밋 근거가 있으면 쓰지 않고, 기록을 못 읽으면 쓰지 않는다. 응답을 못 받으면 결과 미확인으로 두고 다시 보내지 않는다. 실패해도 단계 완료는 그대로. `EUREKA_EVIDENCE_NOTE=off`로 끄고, 작성자는 `EUREKA_NOTE_ACTOR_ID`(선택) | 사용자 요청 2026-11-01 |
 | D-27 | POC 장애 주입: `--poc` + `DESKPET_POC_FAULTS` + flw-d1일 때만. `eureka_stage_slow`, `eureka_stage_fail_once`, `github_approve_drop_once`, `sensor_fail_once`. 운영 코드가 아닌 `scripts/poc-faults.ts`에서 fetch·센서를 감싼다. 시나리오는 `docs/poc-d21-d27.md` | 구현 2026-10-24 |
 | D-26 | 단계별 응답 시간 기록 (NFR-01): 외부 호출(GitHub·Eureka·LLM Guide·Wiki)을 port 경계에서 재어 `HarnessResult.facts.timings` `{totalMs, stages:[{stage, ms, ok}]}`에 담는다. 파이프라인 형식은 `facts.timings`(JSON 문자열), 출력 모델은 `modelMs`. 서버 콘솔에 요청마다 `[timing]` 한 줄 (`DESKPET_TIMING_LOG=off`로 끔) | 구현 2026-10-24 |

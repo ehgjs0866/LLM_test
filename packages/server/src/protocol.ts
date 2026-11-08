@@ -52,7 +52,8 @@ export type ServerFrame =
   | { type: 'snapshot'; snapshot: unknown }
   | { type: 'event'; event: unknown }
   /** 요청이 끝난 뒤 확정된 결과 (D-23). pipeline 연결에만 보낸다. resultText는 고정 문구 */
-  | { type: 'notice'; notice: unknown; resultText: string }
+  /** held: 파이프라인 연결이 없던 동안 보관했다가 연결 직후 보낸 알림 */
+  | { type: 'notice'; notice: unknown; resultText: string; held?: boolean }
   | { type: 'pong'; id: string }
   | { type: 'error'; code: ErrorCode; message: string };
 

@@ -122,7 +122,15 @@ export const PipelineOutputRequest = z
   .passthrough();
 export type PipelineOutputRequest = z.infer<typeof PipelineOutputRequest>;
 
-export const PipelineOutputText = z.object({ text: z.string() });
+export const PipelineOutputText = z.object({
+  text: z.string(),
+  /** 화면 계약(wiki deskpet-display-interface) 값. 확장 필드라 없어도 된다 (2026-11-03 D-32) */
+  displayText: z.string().optional(),
+  emotion: z.enum(['neutral', 'happy', 'sad']).optional(),
+  /** 쓰기 작업 결과가 있을 때만 */
+  actionStatus: z.enum(['succeeded', 'failed', 'unknown']).optional(),
+  modelMs: z.number().nonnegative().optional(),
+});
 export type PipelineOutputText = z.infer<typeof PipelineOutputText>;
 
 /** facts 키 (Harness → 파이프라인). 파이프라인은 질문 전달 보고(pipeline.event)에 pendingId·outputId를 그대로 쓴다 */

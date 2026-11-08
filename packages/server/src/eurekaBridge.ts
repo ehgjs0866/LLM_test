@@ -16,6 +16,7 @@ import {
   type PrLinkLookup,
   extractPrLinks,
 } from '@deskpet/contracts';
+import { createHash } from 'node:crypto';
 import type { EurekaGateway } from '@deskpet/gateways';
 import { DEFAULT_POLICY, StoreDispatchOwner, expectedOutcomeFor, type Clock, type OperationStore } from '@deskpet/harness';
 import { formatKoreanDateTime } from '@deskpet/output';
@@ -29,7 +30,8 @@ import { formatKoreanDateTime } from '@deskpet/output';
  * - 쓰기 응답 유실은 unknown, reconcile로만 확인한다. 재전송하지 않는다
  *
  * 문서에 없어 현재 구현을 따른 부분 (docs/pipeline-bridge.md P-12~)
- * - 의도 값: eureka.list / eureka.status / eureka.postpone / eureka.register / eureka.complete
+ * - 의도 값: 라우터 형식(intention=eureka + operation 라벨) 또는 eureka.<이름>. 지원: list·query·status·postpone(update_due_date)·
+ *   create(register)·complete·add_note·query_processes. 그 밖의 라우터 라벨은 실행하지 않고 지원 범위를 안내한다
  * - 쓰기는 mutationApproved=true일 때만 보낸다. 아니면 고정 확인 질문(needs_clarification)을 돌려준다
  * - 쓰기는 operation 기록(owner=pipeline_eureka_module)과 DurableAck를 거친다. 같은 operationId 재요청은 기록된 결과를 돌려준다
  * - 결과 문장은 facts.resultText(고정 문구)로 준다. 파이프라인은 출력 모델의 requiredText로 쓴다
@@ -56,17 +58,66 @@ export interface EurekaBridgeDeps {
   timezone?: string;
 }
 
-type DirectWrite = Extract<ActionName, 'register_item' | 'postpone_item' | 'complete_item'>;
-const INTENTS: Record<string, 'list' | 'status' | DirectWrite> = {
-  'eureka.list': 'list',
-  'eureka.query': 'list',
-  'eureka.status': 'status',
-  'eureka.postpone': 'postpone_item',
-  'eureka.update_due_date': 'postpone_item',
-  'eureka.register': 'register_item',
-  'eureka.create': 'register_item',
-  'eureka.complete': 'complete_item',
+type DirectWrite = Extract<ActionName, 'register_item' | 'postpone_item' | 'complete_item' | 'add_stage_note'>;
+type Kind = 'list' | 'query' | 'status' | 'processes' | DirectWrite;
+
+/**
+ * 의도 이름 → 처리. 두 형식을 받는다 (wiki small-router-model: Intention=eureka + Operation 24개 라벨)
+ * - 라우터 형식: intention='eureka', operation='<라벨>'
+ * - 기존 형식: intention='eureka.<이름>' (P-12)
+ */
+const OPS: Record<string, Kind> = {
+  list: 'list',
+  query: 'query',
+  status: 'status',
+  postpone: 'postpone_item',
+  update_due_date: 'postpone_item',
+  register: 'register_item',
+  create: 'register_item',
+  complete: 'complete_item',
+  add_note: 'add_stage_note',
+  query_processes: 'processes',
 };
+
+/** 아직 지원하지 않는 라우터 Operation 라벨의 한국어 이름 (미지원 응답에 쓴다) */
+const UNSUPPORTED_OPS: Record<string, string> = {
+  update_stage: '단계 상태 변경',
+  update_priority: '우선순위 변경',
+  update_item: '업무 정보 변경',
+  hold: '업무 보류',
+  resume: '업무 재개',
+  delete: '업무 삭제',
+  start_stage: '단계 시작',
+  reset_stage: '단계 되돌리기',
+  skip_stage: '단계 건너뛰기',
+  complete_task: '체크리스트 완료',
+  query_actors: '담당자 조회',
+  query_workspace: '워크스페이스 조회',
+  add_stage: '단계 추가',
+  delete_stage: '단계 삭제',
+  delete_task: '체크리스트 삭제',
+  add_task: '체크리스트 추가',
+  move_stage_up: '단계 순서 올리기',
+  move_stage_down: '단계 순서 내리기',
+};
+
+/** 미지원 응답 (wiki deskpet-operation-policies §3): 실행하지 않음 → 지원 범위 → 대안 */
+const SUPPORTED_SCOPE = '지금은 업무 조회·등록·기한 변경·완료와 단계 기록 추가를 할 수 있어요.';
+function unsupportedSentence(what?: string): string {
+  return `${what ? `${what}${topic(what)} 아직 지원하지 않아` : '그 요청은'} 실행하지 않았어요. ${SUPPORTED_SCOPE}`;
+}
+
+/** 은/는: 마지막 글자에 받침이 있으면 '은' */
+function topic(word: string): '은' | '는' {
+  const c = word.charCodeAt(word.length - 1);
+  return c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 !== 0 ? '은' : '는';
+}
+
+function operationOf(a: PipelineActionRequest): string {
+  const intention = String(a.decision.headOutputs['intention']?.value ?? '').trim();
+  if (intention === 'eureka') return String(a.decision.headOutputs['operation']?.value ?? '').trim();
+  return intention.startsWith('eureka.') ? intention.slice('eureka.'.length) : '';
+}
 
 export class EurekaBridge {
   private readonly owner: StoreDispatchOwner;
@@ -83,26 +134,40 @@ export class EurekaBridge {
 
   // ============================================================== execute
   async execute(a: PipelineEurekaActionRequest): Promise<PipelineActionResult> {
-    const intent = String(a.decision.headOutputs['intention']?.value ?? '');
-    const kind = INTENTS[intent];
-    if (!kind) return fail(a.operationId, 'POLICY_BLOCKED', `unsupported eureka intention: ${intent || '(none)'}`, '그 요청은 아직 처리할 수 없어요.');
+    const op = operationOf(a);
+    const kind = OPS[op];
+    if (!kind) {
+      // 라우터 24개 라벨 중 아직 실행하지 않는 동작은 EUREKA_OPERATION_NOT_IMPLEMENTED (wiki interface-contracts 2026-11-01), 그 밖의 값은 정책 차단
+      const known = op in UNSUPPORTED_OPS;
+      return fail(a.operationId, known ? 'EUREKA_OPERATION_NOT_IMPLEMENTED' : 'POLICY_BLOCKED', `${known ? 'not implemented' : 'unsupported'} eureka operation: ${op || '(none)'}`, unsupportedSentence(UNSUPPORTED_OPS[op]));
+    }
     if (a.decision.missingRequiredSlots.length) {
       return clarify(a.operationId, { missing: a.decision.missingRequiredSlots.join(',') }, '필요한 정보가 빠졌어요. 어떤 업무인지 조금 더 말해 주시겠어요?');
     }
 
     // 같은 operationId 재요청: 다시 보내지 않고 기록된 결과를 돌려준다
     const prior = await this.findByPipelineOp(a.requestId, a.operationId);
-    if (prior) return this.fromOperation(prior, a.operationId);
+    if (prior) {
+      // 같은 operationId인데 다른 작업·대상이면 이전 결과를 돌려주지 않는다 (업무 섞임 방지, 2026-11-08)
+      const fp = prior.actualRequest['requestFingerprint'];
+      if (typeof fp === 'string' && fp !== fingerprintOf(a)) {
+        return fail(a.operationId, 'OPERATION_ID_REUSED', 'operationId already used for a different eureka request', '이전 요청과 같은 작업 번호로 다른 요청이 와서 실행하지 않았어요. 새 요청으로 다시 말씀해 주세요.');
+      }
+      return this.fromOperation(prior, a.operationId);
+    }
 
     const c = { deadlineAt: a.deadlineAt };
-    if (kind === 'list') return this.list(a, c);
-
-    const name = headString(a, 'name');
-    if (kind === 'register_item') return this.register(a, name, c);
+    const name = itemNameOf(a);
+    // 조회(query): 대상이 있으면 그 업무 상태, 없으면 목록
+    const hasTarget = Target.safeParse(a.decision.resolvedTarget).success || !!name;
+    if (kind === 'list' || (kind === 'query' && !hasTarget)) return this.list(a, c);
+    if (kind === 'processes') return this.processes(a, c);
+    if (kind === 'register_item') return this.register(a, newItemNameOf(a), c);
 
     const item = await this.resolveItem(a, name, c);
     if ('result' in item) return item.result;
-    if (kind === 'status') return this.status(a, item.task, c);
+    if (kind === 'status' || kind === 'query') return this.status(a, item.task, c);
+    if (kind === 'add_stage_note') return this.addNote(a, item.task, c);
     return this.itemWrite(a, kind, item.task, c);
   }
 
@@ -110,8 +175,9 @@ export class EurekaBridge {
   /** 결과를 모르는 직접 경로 쓰기를 조회로만 확인한다. 멱등키가 없어 일치해도 후보 수준이면 unknown을 유지한다 */
   async reconcile(a: PipelineActionRequest): Promise<PipelineActionResult> {
     const ops = (await this.d.store.listOperations(a.requestId)).filter((o) => o.owner === 'pipeline_eureka_module');
-    const op = ops.find((o) => o.actualRequest['pipelineOperationId'] === a.operationId) ?? ops.find((o) => o.recovery === 'needed') ?? ops[ops.length - 1];
-    if (!op) return { operationId: a.operationId, status: 'unknown', facts: {}, error: perr('RECONCILIATION_UNAVAILABLE', 'no eureka operation recorded for this request', a.operationId) };
+    // operationId가 정확히 맞는 기록만 본다. 다른 작업의 결과로 대신하지 않는다 (2026-11-08)
+    const op = ops.find((o) => o.actualRequest['pipelineOperationId'] === a.operationId);
+    if (!op) return { operationId: a.operationId, status: 'unknown', facts: {}, error: perr('RECONCILIATION_UNAVAILABLE', 'no eureka operation recorded with this operationId', a.operationId) };
     if (op.recovery !== 'needed' || !op.actionResult || op.actionResult.status !== 'unknown') return this.fromOperation(op, a.operationId);
 
     const itemId = op.target.kind === 'eureka_item' ? op.target.itemId : undefined;
@@ -125,6 +191,16 @@ export class EurekaBridge {
         const want = op.actualRequest['dueAtMs'];
         const matches = op.action === 'postpone_item' ? t.dueAtMs === want : op.action === 'complete_item' ? t.computedState === 'done' : false;
         observation['linkage'] = matches ? 'candidate_only' : 'none';
+      }
+    }
+    // 단계 기록 추가: 같은 내용의 기록이 생겼는지 조회만 한다 (인과는 후보 수준, 다시 보내지 않음)
+    if (op.action === 'add_stage_note' && op.target.kind === 'eureka_stage') {
+      const notes = await this.d.eureka.listStageNotes({ stageId: op.target.stageId, limit: 100 }, { deadlineAt: a.deadlineAt });
+      if (notes.ok) {
+        const want = op.actualRequest['contentDigest'];
+        const hit = notes.data!.notes.find((n) => digest(n.content) === want);
+        observation['linkage'] = hit ? 'candidate_only' : 'none';
+        if (hit) observation['candidateNoteId'] = hit.noteId;
       }
     }
     const base = await this.fromOperation(op, a.operationId);
@@ -222,6 +298,7 @@ export class EurekaBridge {
       facts: {
         resultText: `'${t.name}' 업무는 ${STATE_KO[s.itemStatus]}이고, 단계 ${s.totalStages}개 중 ${s.doneStages}개가 끝났어요.${due}`,
         itemId: t.itemId,
+        ...(t.updatedAt ? { updatedAt: t.updatedAt } : {}),
         itemStatus: s.itemStatus,
         doneStages: String(s.doneStages),
         totalStages: String(s.totalStages),
@@ -255,7 +332,8 @@ export class EurekaBridge {
     const due = parseDue(a);
     if (due === 'invalid') return clarify(a.operationId, { missing: 'dueAt' }, '마감 날짜와 시간을 다시 알려 주세요.');
     let processId = this.d.defaultProcessId;
-    const task = headString(a, 'task');
+    // 구형 형식만 task 헤드를 업무 유형 이름으로 본다. 새 형식에서 task는 업무 이름·요약이다
+    const task = legacyHeads(a) ? headString(a, 'task') : undefined;
     if (task) {
       const ps = await this.d.eureka.listProcesses(c);
       const hit = ps.ok ? ps.data!.find((p) => p.name === task) : undefined;
@@ -268,6 +346,40 @@ export class EurekaBridge {
       this.d.eureka.registerItem({ processId: processId!, name, ...(due !== undefined ? { dueAtMs: due } : {}) }, h, c),
       { ok: `'${name}' 업무를 등록했어요.`, what: `'${name}' 업무 등록` },
     );
+  }
+
+  private async processes(a: PipelineActionRequest, c: { deadlineAt: string }): Promise<PipelineActionResult> {
+    const ps = await this.d.eureka.listProcesses(c);
+    if (!ps.ok) return fromError(a.operationId, ps.result.error, '업무 유형 목록을 가져오지 못했어요.');
+    const names = ps.data!.map((p) => p.name).filter(Boolean);
+    const text = names.length ? `등록할 수 있는 업무 유형은 ${names.slice(0, 5).join(', ')}${names.length > 5 ? ` 외 ${names.length - 5}개` : ''}예요.` : '등록할 수 있는 업무 유형이 없어요.';
+    return { operationId: a.operationId, status: 'succeeded', facts: { resultText: text, count: String(names.length), processes: JSON.stringify(ps.data!.slice(0, 20)) }, error: null };
+  }
+
+  /**
+   * 단계 기록 추가 (라우터 add_note). 기록 내용은 note 헤드. 단계는 name 헤드(구형은 stage·checkpoint) 이름과 같은 단계,
+   * 없으면 진행 중인 단계 → 첫 미완료 단계 → 마지막 단계 순으로 고른다. 쓰기라 확인을 거친다 (mutationApproved)
+   */
+  private async addNote(a: PipelineEurekaActionRequest, t: TaskSummary, c: { deadlineAt: string }): Promise<PipelineActionResult> {
+    const content = headString(a, 'note');
+    if (!content) return clarify(a.operationId, { missing: 'note', itemId: t.itemId }, `'${t.name}' 업무에 어떤 내용을 기록할까요?`);
+    if (content.length > 2_000) return clarify(a.operationId, { missing: 'note', itemId: t.itemId }, '기록 내용이 너무 길어요. 조금 줄여서 말씀해 주세요.');
+    const wanted = stageNameOf(a);
+    const stages = [...t.stages].sort((x, y) => (x.order ?? 0) - (y.order ?? 0));
+    const stage = wanted
+      ? stages.find((s) => s.name === wanted)
+      : (stages.find((s) => s.status === 'doing') ?? stages.find((s) => s.status === 'todo') ?? stages[stages.length - 1]);
+    if (!stage) {
+      return wanted
+        ? clarify(a.operationId, { missing: 'stage', itemId: t.itemId }, `'${t.name}' 업무에서 '${wanted}' 단계를 찾지 못했어요. 어느 단계에 남길까요?`)
+        : fail(a.operationId, 'EUREKA_NOT_FOUND', 'item has no stages', `'${t.name}' 업무에는 기록을 남길 단계가 없어요.`);
+    }
+    if (!a.mutationApproved) return confirm(a.operationId, `'${t.name}' 업무의 '${stage.name}' 단계에 "${content}"라고 기록을 남길까요?`, { itemId: t.itemId, stageId: stage.stageId });
+    const target = { kind: 'eureka_stage' as const, itemId: t.itemId, stageId: stage.stageId };
+    return this.write(a, 'add_stage_note', target, { itemId: t.itemId, stageId: stage.stageId, stageName: stage.name, contentLength: content.length, contentDigest: digest(content) }, (h) => this.d.eureka.addStageNote({ operationId: a.operationId, stageId: stage.stageId, content }, h, c), {
+      ok: `'${stage.name}' 단계에 기록을 남겼어요.`,
+      what: `'${stage.name}' 단계 기록 추가`,
+    });
   }
 
   private async itemWrite(a: PipelineEurekaActionRequest, kind: 'postpone_item' | 'complete_item', t: TaskSummary, c: { deadlineAt: string }): Promise<PipelineActionResult> {
@@ -307,7 +419,7 @@ export class EurekaBridge {
       isWrite: true,
       expectedOutcome: expectedOutcomeFor(action, target),
       checkRuleVersion: DEFAULT_POLICY.checkRuleVersion,
-      actualRequest: { ...request, pipelineOperationId: a.operationId, deadlineAt: a.deadlineAt, mutationApproved: true },
+      actualRequest: { ...request, pipelineOperationId: a.operationId, requestFingerprint: fingerprintOf(a), deadlineAt: a.deadlineAt, mutationApproved: true },
       priorEvidence: {},
       holderId: '',
     });
@@ -361,6 +473,12 @@ export class EurekaBridge {
     if (!ar) return { operationId, status: 'unknown', facts: { ...facts, phase: op.executionPhase }, error: perr('IN_PROGRESS', 'operation has no result yet', operationId) };
     facts[K.dispatchState] = ar.dispatchState;
     if (op.target.kind === 'eureka_item') facts['itemId'] = op.target.itemId;
+    if (op.target.kind === 'eureka_stage') Object.assign(facts, { itemId: op.target.itemId, stageId: op.target.stageId });
+    // 업무 등록: 새 업무 ID를 항상 facts.itemId로 준다 (응답에 ID가 없으면 결과 미확인으로 남아 있다)
+    const newItem = ar.externalRefs.find((r) => r.kind === 'item')?.id;
+    if (newItem) facts['itemId'] = newItem;
+    const noteId = ar.externalRefs.find((r) => r.kind === 'stage_note')?.id;
+    if (noteId) facts['noteId'] = noteId;
     const due = op.actualRequest['dueAtMs'];
     if (typeof due === 'number') facts['dueAt'] = this.offsetIso(due);
     return { operationId, status: ar.status, facts, error: ar.error ? toError(ar.error, operationId) : null };
@@ -390,6 +508,36 @@ function ro(word: string): string {
 }
 
 const STATE_KO: Record<string, string> = { todo: '시작 전', doing: '진행 중', done: '완료', hold: '보류' };
+
+/** 요청 지문: 작업 종류·대상·값. 같은 operationId 재요청이 같은 요청인지 본다 (mutationApproved·deadline은 제외) */
+function fingerprintOf(a: PipelineActionRequest): string {
+  const keys = ['target', 'name', 'checkpoint', 'dueAt', 'task', 'note', 'stage', 'priority'];
+  const heads = Object.fromEntries(keys.map((k) => [k, a.decision.headOutputs[k]?.value ?? null]));
+  return digest(JSON.stringify({ op: operationOf(a), heads, target: a.decision.resolvedTarget ?? null }));
+}
+
+function digest(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+/**
+ * 헤드 의미 (wiki interface-contracts 2026-11-01): target = 업무 원문, name = 단계 원문, checkpoint = 체크포인트 원문,
+ * task = 이름·요약(생성), note = 설명(생성). 구형 형식(modelIntention 헤드 없음)은 name을 업무 이름으로 본다.
+ */
+function legacyHeads(a: PipelineActionRequest): boolean {
+  return a.decision.headOutputs['modelIntention'] === undefined;
+}
+function itemNameOf(a: PipelineActionRequest): string | undefined {
+  return headString(a, 'target') ?? (legacyHeads(a) ? headString(a, 'name') : undefined);
+}
+/** 새 업무 이름: task(이름·요약) → target. 구형은 name */
+function newItemNameOf(a: PipelineActionRequest): string | undefined {
+  return legacyHeads(a) ? (headString(a, 'name') ?? headString(a, 'target')) : (headString(a, 'task') ?? headString(a, 'target'));
+}
+/** 단계 이름: 새 형식은 name, 구형은 stage·checkpoint */
+function stageNameOf(a: PipelineActionRequest): string | undefined {
+  return legacyHeads(a) ? (headString(a, 'stage') ?? headString(a, 'checkpoint')) : headString(a, 'name');
+}
 
 function headString(a: PipelineActionRequest, key: string): string | undefined {
   const v = a.decision.headOutputs[key]?.value;

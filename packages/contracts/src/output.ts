@@ -10,9 +10,25 @@ import { ActionResult, ActionStatus, ErrorInfo, ReminderPayload } from './record
 export const OutputPurpose = z.enum(['result', 'question', 'progress', 'reminder']);
 export type OutputPurpose = z.infer<typeof OutputPurpose>;
 
-/** 지원 표현 범위는 하드웨어/UX 담당(박종하)이 확정한다. 잠정 enum. */
-export const Emotion = z.enum(['neutral', 'cheerful', 'concerned', 'thinking', 'apologetic']);
+/**
+ * 출력 감정 값. wiki deskpet-display-interface(김도헌 담당 출력 모델 → 화면): 출력 모델 값은 neutral·happy·sad만 쓴다.
+ * 업무 결과는 감정이 아니라 actionStatus(succeeded·failed·unknown)로 따로 전달한다.
+ */
+export const Emotion = z.enum(['neutral', 'happy', 'sad']);
 export type Emotion = z.infer<typeof Emotion>;
+export const EMOTIONS: readonly Emotion[] = Emotion.options;
+
+/** 모델이 다른 이름(cheerful·apologetic 등)을 내면 지원 값으로 정규화한다. 모르는 값은 neutral */
+export function normalizeEmotion(v: unknown): Emotion {
+  const s = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  if (s === 'happy' || s === 'cheerful' || s === 'joy' || s === 'excited' || s === 'pleased') return 'happy';
+  if (s === 'sad' || s === 'apologetic' || s === 'sorry' || s === 'disappointed') return 'sad';
+  return 'neutral';
+}
+
+/** 화면에 보낼 업무 결과. 결과가 없거나 취소면 생략한다 (결과 없는데 unknown을 쓰지 않음) */
+export const DisplayActionStatus = z.enum(['succeeded', 'failed', 'unknown']);
+export type DisplayActionStatus = z.infer<typeof DisplayActionStatus>;
 
 export const OutputRequest = z
   .object({
@@ -53,6 +69,8 @@ export const OutputContent = z.object({
   emotion: Emotion,
   /** 업무 status는 일반 코드가 복사한다. 모델이 수정하지 않는다. */
   actionStatuses: z.array(z.object({ operationId: Id, status: ActionStatus })),
+  /** 화면용 대표 업무 결과 (마지막 쓰기 작업). 실제 결과에서 복사한다. 조회만 했거나 결과가 없으면 생략 */
+  actionStatus: DisplayActionStatus.optional(),
   validationResult: z.object({ passed: z.boolean(), failures: z.array(z.string()) }),
   fallbackUsed: z.boolean(),
   /** 출력 모델 호출에 걸린 시간(ms). 모델을 부르지 않았으면 없음 (NFR-01, D-26) */

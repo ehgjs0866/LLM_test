@@ -348,7 +348,7 @@ gh api repos/ehgjs0866/personal_MCP_test/commits/293300b/check-runs --jq ".check
 - 단계 목록 응답의 `note$$`는 `{id, stereo:"comment"}`만 준다. 본문은 PDF에 없는 경로 `GET /_api_/notes/0/list?sites&detail=true&stageId=` 또는 `GET /_api_/notes/{id}`의 `content`에 있다 (`pnpm eureka:fields 1000020 --notes`로 확인). `GET /_api_/stages/{id}`도 동작한다.
 - 결정(D-21): 단계 기록에 `PR: https://github.com/<owner>/<repo>/pull/<번호>`를 남기고, `eureka.links`가 이를 읽어 대상 PR과 완료할 단계를 정한다.
 - 남은 문제: **Eureka 웹 화면에서 남긴 기록이 보이지 않는다** (API로는 저장·조회됨). 같은 기록이 두 번 저장된 것(1000017·1000018)도 화면에 안 보여 다시 누른 결과로 보임 → Eureka 담당자에게 문의.
-- 보류: 허용 저장소 목록, 작성자 제한(담당자 기록만), 기록 목록 페이지 넘김(지금 50건까지).
+- 보류: 허용 저장소 목록, 작성자 제한(담당자 기록만), 기록 목록 페이지 넘김(지금 100건까지, 2026-11-08 50→100).
 
 ## 18. 단계 기록 작성 API (2026-11-01)
 

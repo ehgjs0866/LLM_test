@@ -47,7 +47,7 @@ export interface ReviewFacts {
   approvalWarnings: string[];
 }
 
-export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): ReviewFacts {
+export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string, opts: { ignoreChecks?: boolean } = {}): ReviewFacts {
   const head = ctx.initialHeadSha;
   const sections: ReviewFacts['sections'] = {};
   for (const s of ctx.sections) {
@@ -122,6 +122,7 @@ export function reviewFacts(ctx: ReviewContext, expectedHeadSha?: string): Revie
       expectedHeadSha: expectedHeadSha ?? head ?? '',
       viewerPermission: (ctx.viewer?.permission as ViewerPermission | undefined) ?? 'unknown',
       ...(ctx.viewer ? { viewerLogin: ctx.viewer.login } : {}),
+      ...(opts.ignoreChecks ? { ignoreChecks: true } : {}),
     });
     if (ctx.consistency === 'changed' && !f.approvalBlockers.includes('sha_changed')) f.approvalBlockers.push('sha_changed');
     f.approvalWarnings = approvalWarnings(checks?.sectionKind === 'checks' ? checks.data : undefined);

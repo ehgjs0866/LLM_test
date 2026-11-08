@@ -1,4 +1,4 @@
-import { confirmationTokens, type ConfirmationScope, type Emotion, type HarnessResult, type OutputRequest } from '@deskpet/contracts';
+import { EMOTIONS, confirmationTokens, type ConfirmationScope, type Emotion, type HarnessResult, type OutputRequest } from '@deskpet/contracts';
 
 /**
  * «function» HarnessOutputMapper — 김도헌 설계 책임, 호출 주체는 파이프라인 (다이어그램).
@@ -12,7 +12,7 @@ export interface OutputContext {
   allowedEmotions?: Emotion[];
 }
 
-const ALL_EMOTIONS: Emotion[] = ['neutral', 'cheerful', 'concerned', 'thinking', 'apologetic'];
+const ALL_EMOTIONS: Emotion[] = [...EMOTIONS];
 
 export function mapHarnessResult(r: HarnessResult, ctx: OutputContext = {}): OutputRequest {
   const isQuestion = r.disposition === 'awaiting_user' && !!r.pending;

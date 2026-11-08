@@ -42,6 +42,11 @@ export interface GitHubReviewGatewayOptions {
    * 응답 대기는 호출 deadline 안으로 제한한다. 거절·시간 초과는 전송 전 종료(not_sent)라 결과가 모호하지 않다.
    */
   operatorConfirm?: OperatorConfirm;
+  /**
+   * CI 검사 처리. 'skip'이면 검사(checks·필수 검사 설정)를 조회하지 않고 승인 조건에서도 뺀다.
+   * 권한·본인 PR 확인용 viewer 조회는 그대로 한다. 기본 'enforce' (README D-30)
+   */
+  checksPolicy?: 'enforce' | 'skip';
 }
 
 export type OperatorVerdict = 'approved' | 'declined' | 'timeout';
@@ -94,7 +99,7 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
     // 요청 section만, 상한 내 병렬 조회 (원자적 스냅샷 아님)
     const sections = await Promise.all(
       (['changes', 'checks', 'reviews'] as const).map((k) =>
-        q.requestedSections.includes(k) ? this.fetchSection(k, q, prBasics, c) : Promise.resolve(notRequested(k)),
+        q.requestedSections.includes(k) && !(k === 'checks' && this.o.checksPolicy === 'skip') ? this.fetchSection(k, q, prBasics, c) : Promise.resolve(notRequested(k)),
       ),
     );
 
@@ -222,6 +227,7 @@ export class GitHubReviewGateway implements GitHubReviewGatewayPort {
       expectedHeadSha: cmd.expectedHeadSha,
       viewerPermission: viewer.ok ? viewer.data.permission : 'unknown',
       ...(viewer.ok ? { viewerLogin: viewer.data.login } : {}),
+      ...(this.o.checksPolicy === 'skip' ? { ignoreChecks: true } : {}),
     });
     if (ctx.consistency === 'changed' && !blockers.includes('sha_changed')) blockers.push('sha_changed');
     if (blockers.length > 0) {

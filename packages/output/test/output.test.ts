@@ -85,7 +85,14 @@ describe('OutputService', () => {
   it('accepts a valid model sentence and constrains emotion to the allowed set', async () => {
     const c = await new OutputService({ model: model(`네, ${`NewLine/DeskPet PR 42번, 현재 커밋 ${SHA_A.slice(0, 7)}`}을 지금 승인할까요?`, 'ecstatic') }).generate(mapHarnessResult(approvalQuestion));
     expect(c.fallbackUsed).toBe(false);
-    expect(c.emotion).toBe('thinking');
+    // 지원하지 않는 감정 이름은 neutral로 (화면 계약: neutral·happy·sad)
+    expect(c.emotion).toBe('neutral');
+    expect(c.actionStatus).toBeUndefined();
+  });
+
+  it('감정 이름 정규화와 업무 결과(actionStatus) 복사: 성공은 happy, 결과와 모순되는 감정은 결과에 맞춘다', async () => {
+    const { normalizeEmotion } = await import('@deskpet/contracts');
+    expect(['cheerful', 'apologetic', 'concerned', 'thinking', 'happy', 'sad'].map(normalizeEmotion)).toEqual(['happy', 'sad', 'neutral', 'neutral', 'happy', 'sad']);
   });
 
   it('model failure → fixed phrase', async () => {

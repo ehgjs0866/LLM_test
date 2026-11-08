@@ -68,7 +68,7 @@ describe('LLM 보조 Guide', () => {
       const w = createWorld({ llm });
       const r = await ask(w, '알아서 처리해줘');
       // 형식 오류는 '처리할 수 없는 요청'이 아니라 '판단 모델을 쓸 수 없음'으로 구분한다
-      expect(r.facts['blocked']).toMatchObject({ reasons: ['llm_unavailable'] });
+      expect((r.facts['blocked'] as { reasons: string[] }).reasons[0]).toBe('llm_unavailable');
       expect(r.actionResults).toEqual([]);
       expect(w.github.reads).toHaveLength(0);
       expect((await speak(r)).text).toBe('판단을 도와주는 모델에게서 지금 쓸 수 있는 답을 받지 못해 처리하지 못했어요. 외부 작업은 하지 않았어요. 잠시 후 다시 말씀해 주세요.');
@@ -78,12 +78,27 @@ describe('LLM 보조 Guide', () => {
   it('LLM 장애(시간 초과·인증·호출 상한)는 규칙과 같은 차단 결정으로 끝난다', async () => {
     for (const code of ['timeout', 'auth', 'budget_exceeded'] as const) {
       const w = createWorld({ llm: script(new LlmError(code, code)) });
-      const r = await ask(w, '이 PR 요약해줘');
+      // 읽기 요청이 아닌 말이면 대체 경로 없이 막는다 (읽기 요청은 아래 대체 경로 테스트)
+      const r = await ask(w, '이 프로젝트 배경이 뭐야');
       expect(r.disposition).toBe('completed');
-      expect(r.facts['blocked']).toMatchObject({ reasons: ['llm_unavailable'] });
+      // 실제 LLM 오류 코드도 함께 남긴다
+      expect(r.facts['blocked']).toMatchObject({ reasons: ['llm_unavailable', `reason:llm_unavailable:${code}`] });
       expect(r.facts['guideSteps']).toEqual([`llm_unavailable:${code}`]);
       expect(w.github.reads).toHaveLength(0);
     }
+  });
+
+  it('LLM 장애여도 대상 PR이 있는 읽기 요청은 리뷰(읽기)만 대신 처리한다. 승인 말이 있으면 대신 처리하지 않는다 (2026-11-08)', async () => {
+    const w = createWorld({ llm: script(new LlmError('unavailable', 'down')) });
+    const r = await ask(w, '그 PR 변경 내용 확인해줘', 'llm');
+    expect(r.actionResults.map((a) => a.action)).toEqual(['get_review_context']);
+    expect((r.facts['guideSteps'] as string[])[0]).toMatch(/^llm_unavailable/);
+    expect((await speak(r)).text).toContain('PR 42번');
+    expect(w.github.submitCount).toBe(0);
+    const w2 = createWorld({ llm: script(new LlmError('unavailable', 'down')) });
+    const r2 = await ask(w2, '그 PR 확인하고 승인해줘', 'llm');
+    expect(r2.actionResults).toHaveLength(0);
+    expect((r2.facts['blocked'] as { reasons: string[] }).reasons[0]).toBe('llm_unavailable');
   });
 
   it('PR 자료를 모은 뒤 LLM이 시간 초과되면 차단하지 않고 그 자료로 답한다', async () => {
