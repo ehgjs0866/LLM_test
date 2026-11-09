@@ -7,15 +7,25 @@
  *   pnpm demo:adapter reminders                          # EurekaAdapter.reminders()
  *   pnpm demo:adapter reminder <itemId>                  # EurekaAdapter.reminder(itemId)
  *   pnpm demo:adapter links <itemId>                     # eureka.links: 단계 기록의 PR 주소 → 연결된 PR (P-19)
- *   pnpm demo:adapter eureka list                        # execute: eureka.list
- *   pnpm demo:adapter eureka status "업무 이름"            # execute: eureka.status
- *   pnpm demo:adapter eureka postpone "업무 이름" 2026-10-20T23:59:00+09:00 [--approve]
- *                                                        # 쓰기: --approve 없으면 확인 질문만, 있어도 서버에서 Eureka 쓰기는 꺼져 있음
+ *   직접 Eureka 요청 (라우터 형식: intention=eureka + operation, D-33 헤드 의미)
+ *   pnpm demo:adapter eureka list                        # 열린 업무 목록
+ *   pnpm demo:adapter eureka processes                   # 등록할 수 있는 업무 유형
+ *   pnpm demo:adapter eureka query ["업무"]               # 업무 상태 (없으면 목록). status도 같음
+ *   pnpm demo:adapter eureka create "새 업무" [마감ISO]     # 쓰기: 업무 등록 (EUREKA_DEFAULT_PROCESS_ID 필요)
+ *   pnpm demo:adapter eureka postpone "업무" 마감ISO        # 쓰기: 마감 변경 (예: 2026-11-20T23:59:00+09:00)
+ *   pnpm demo:adapter eureka note "업무" "내용" [--stage "단계"]   # 쓰기: 단계 기록 추가
+ *   pnpm demo:adapter eureka complete "업무"               # 쓰기: 업무 전체 완료
+ *   pnpm demo:adapter eureka unsupported                 # 미지원 작업(delete) 안내 확인
+ *   pnpm demo:adapter eureka reconcile --req <requestId> --op <operationId>   # 결과 조회
+ *     쓰기는 확인 질문을 보여 주고 답을 받는다(승인 말 → 같은 요청에 mutationApproved=true). --answer "응" 또는 --approve로 미리 지정
+ *     --req·--op로 requestId·operationId를 직접 줄 수 있다 (같은 번호 재사용 거절 확인용)
+ *     --eureka-server: Eureka 내부 API 서버(pnpm eureka:server, EUREKA_WS_URL 기본 ws://127.0.0.1:8789)에 붙는다
  *   pnpm demo:adapter harness [PR번호] [--answer "응, 승인해"]
  *   pnpm demo:adapter harness --item <itemId>            # 위와 같되 대상 PR·완료할 단계를 eureka.links로 찾는다
  *                                                        # HarnessAdapter.run: 리뷰 → 승인 질문 → output.generate → 전달 보고 → 답변
  *
  * .env: HARNESS_WS_URL(기본 ws://127.0.0.1:8787), HARNESS_WS_TOKEN, GITHUB_TEST_REPO, GITHUB_TEST_PR
+ *       EUREKA_WS_URL·EUREKA_WS_TOKEN (--eureka-server일 때, 토큰이 없으면 HARNESS_WS_TOKEN)
  *
  * --fixture: pnpm web:fixture 서버(가짜 GitHub·Eureka)에 붙는다. 주소·토큰·PR을 fixture 값으로 바꾼다 (.env 불필요)
  *   pnpm demo:adapter --fixture harness --answer "응, 승인해"
@@ -30,14 +40,14 @@ try {
 }
 const env = process.env;
 const fixture = process.argv.includes('--fixture');
-const args = process.argv.slice(2).filter((a) => a !== '--fixture');
+const eurekaServer = process.argv.includes('--eureka-server');
+const args = process.argv.slice(2).filter((a) => a !== '--fixture' && a !== '--eureka-server');
 if (fixture) {
   env['HARNESS_WS_URL'] = 'ws://127.0.0.1:8788';
   env['HARNESS_WS_TOKEN'] = 'fixture-pipeline-token-123';
   env['GITHUB_TEST_REPO'] = 'NewLine/DeskPet';
   env['GITHUB_TEST_PR'] = '42';
 }
-const flag = (f: string) => args.includes(f);
 const valueOf = (f: string) => {
   const i = args.indexOf(f);
   return i >= 0 ? args[i + 1] : undefined;
@@ -47,9 +57,10 @@ const fail = (msg: string): never => {
   process.exit(1);
 };
 
-const token = env['HARNESS_WS_TOKEN']?.trim() || fail('HARNESS_WS_TOKEN이 비어 있어요 (서버와 같은 값)');
+const token = (eurekaServer ? env['EUREKA_WS_TOKEN']?.trim() : undefined) || env['HARNESS_WS_TOKEN']?.trim() || fail('HARNESS_WS_TOKEN이 비어 있어요 (서버와 같은 값)');
 const runId = Date.now().toString(36);
-const client = new HarnessClient(env['HARNESS_WS_URL']?.trim() || 'ws://127.0.0.1:8787', runId);
+const url = eurekaServer ? env['EUREKA_WS_URL']?.trim() || 'ws://127.0.0.1:8789' : env['HARNESS_WS_URL']?.trim() || 'ws://127.0.0.1:8787';
+const client = new HarnessClient(url, runId);
 const deadline = (sec = 60) => new Date(Date.now() + sec * 1000).toISOString();
 let n = 0;
 const id = (p: string) => `${p}-${runId}-${++n}`;
@@ -97,18 +108,65 @@ async function ask(q: string): Promise<string | undefined> {
 }
 
 // ---------------------------------------------------------------- eureka
+/** 라우터 형식 결정 (intention=eureka + operation). 헤드: target=업무, name=단계, task=새 업무 이름, note=기록 내용, dueAt=마감 */
+function eurekaDecision(operation: string, heads: Record<string, string | undefined> = {}) {
+  const all: Record<string, string> = { intention: 'eureka', modelIntention: 'eureka', operation };
+  for (const [k, v] of Object.entries(heads)) if (v !== undefined) all[k] = v;
+  return {
+    headOutputs: Object.fromEntries(Object.entries(all).map(([k, v]) => [k, { value: v, confidence: 0.95 }])),
+    overallConfidence: 0.93,
+    missingRequiredSlots: [],
+    route: 'eureka',
+  };
+}
+
+type EurekaResult = { operationId: string; status: string; facts: Record<string, string>; error: { code: string; message: string } | null };
+
+function showEureka(title: string, requestId: string, r: EurekaResult) {
+  console.log(`\n── ${title} ──`);
+  console.log(`  requestId=${requestId}  operationId=${r.operationId}`);
+  console.log(`  상태: ${r.status}${r.error ? `  오류: ${r.error.code} (${r.error.message})` : ''}`);
+  const text = r.facts['resultText'] ?? r.facts['question'];
+  if (text) console.log(`  🗣 ${text}`);
+  const rest = Object.fromEntries(Object.entries(r.facts).filter(([k]) => k !== 'resultText' && k !== 'question'));
+  if (Object.keys(rest).length) console.log(`  facts: ${JSON.stringify(rest, null, 2).replace(/\n/g, '\n  ')}`);
+}
+
 async function eureka() {
   const sub = args[1];
-  const requestId = id('adapter-eureka');
-  if (sub === 'list') return show('eureka.execute (list)', await call('eureka.execute', requestId, { requestId, operationId: id('op'), decision: decision('eureka.list'), deadlineAt: deadline() }));
-  const name = args[2] ?? fail('업무 이름이 필요해요 (따옴표로 감싸세요)');
-  if (sub === 'status') return show('eureka.execute (status)', await call('eureka.execute', requestId, { requestId, operationId: id('op'), decision: decision('eureka.status', { name }), deadlineAt: deadline() }));
-  if (sub === 'postpone') {
-    const dueAt = args[3] ?? fail('새 마감이 필요해요 (예: 2026-10-20T23:59:00+09:00)');
-    const payload = { requestId, operationId: id('op'), decision: decision('eureka.postpone', { name, dueAt }), deadlineAt: deadline(), mutationApproved: flag('--approve') };
-    return show(`eureka.execute (postpone, mutationApproved=${flag('--approve')})`, await call('eureka.execute', requestId, payload));
+  const requestId = valueOf('--req') ?? id('adapter-eureka');
+  const operationId = valueOf('--op') ?? id('op');
+  const pos = args.slice(2).filter((a, i, all) => !a.startsWith('--') && !['--stage', '--answer', '--req', '--op'].includes(all[i - 1] ?? ''));
+  const exec = async (decision: unknown, mutationApproved: boolean) =>
+    (await call('eureka.execute', requestId, { requestId, operationId, decision, deadlineAt: deadline(), mutationApproved })) as EurekaResult;
+  /** 확인 질문이면 답을 받아 같은 요청을 mutationApproved=true로 다시 보낸다 (파이프라인 흐름) */
+  const run = async (title: string, decision: unknown) => {
+    let r = await exec(decision, false);
+    showEureka(`${title} — 1차`, requestId, r);
+    if (r.status === 'needs_clarification' && r.facts['questionKind'] === 'confirmation') {
+      const a = args.includes('--approve') ? '응' : await ask('답변 (예: 응 / 아니). 빈 입력이면 종료');
+      if (args.includes('--approve')) console.log('  > 응  (--approve)');
+      if (!a || answerVerdict(a) !== 'approve') return console.log('\n승인 말이 없어 실행하지 않고 끝냅니다. Eureka에 아무것도 보내지 않았어요.');
+      r = await exec(decision, true);
+      showEureka(`${title} — 승인 후 (mutationApproved=true)`, requestId, r);
+    }
+  };
+  const need = (v: string | undefined, what: string) => v ?? fail(`${what}이(가) 필요해요 (따옴표로 감싸세요)`);
+
+  if (sub === 'list') return run('목록', eurekaDecision('list'));
+  if (sub === 'processes') return run('업무 유형', eurekaDecision('query_processes'));
+  if (sub === 'query' || sub === 'status') return run('상태', eurekaDecision('query', { target: pos[0] }));
+  if (sub === 'create') return run('업무 등록', eurekaDecision('create', { task: need(pos[0], '새 업무 이름'), dueAt: pos[1] }));
+  if (sub === 'postpone') return run('마감 변경', eurekaDecision('postpone', { target: need(pos[0], '업무 이름'), dueAt: need(pos[1], '새 마감(예: 2026-11-20T23:59:00+09:00)') }));
+  if (sub === 'note') return run('단계 기록', eurekaDecision('add_note', { target: need(pos[0], '업무 이름'), note: need(pos[1], '기록 내용'), name: valueOf('--stage') }));
+  if (sub === 'complete') return run('업무 완료', eurekaDecision('complete', { target: need(pos[0], '업무 이름') }));
+  if (sub === 'unsupported') return run('미지원 작업', eurekaDecision('delete', { target: pos[0] ?? '아무 업무' }));
+  if (sub === 'reconcile') {
+    if (!valueOf('--req') || !valueOf('--op')) fail('--req <requestId> --op <operationId> 가 필요해요 (쓰기 결과에 찍힌 값)');
+    const r = (await call('eureka.reconcile', requestId, { requestId, operationId, decision: eurekaDecision('query'), deadlineAt: deadline() })) as EurekaResult;
+    return showEureka('결과 조회', requestId, r);
   }
-  fail(`알 수 없는 하위 명령: ${sub ?? '(없음)'} — list | status | postpone`);
+  fail(`알 수 없는 하위 명령: ${sub ?? '(없음)'} — list | processes | query | create | postpone | note | complete | unsupported | reconcile`);
 }
 
 // --------------------------------------------------------------- harness
@@ -193,7 +251,7 @@ async function main() {
   } else if (cmd === 'links') show('eureka.links', await links(args[1] ?? fail('itemId가 필요해요')));
   else if (cmd === 'eureka') await eureka();
   else if (cmd === 'harness') await harness();
-  else fail('명령: reminders | reminder <itemId> | links <itemId> | eureka list|status|postpone | harness [PR번호] [--item <itemId>]');
+  else fail('명령: reminders | reminder <itemId> | links <itemId> | eureka list|processes|query|create|postpone|note|complete|unsupported|reconcile | harness [PR번호] [--item <itemId>]');
 }
 
 main()

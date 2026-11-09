@@ -24,6 +24,7 @@
     "web:build": "pnpm --filter @deskpet/web build",
     "web:fixture": "tsx scripts/web-fixture.ts",
     "eureka:fields": "tsx scripts/eureka-fields.ts",
+    "eureka:check": "tsx scripts/eureka-check.ts",
     "web:dev:lan": "pnpm --filter @deskpet/web dev --host 0.0.0.0"
   },
   "devDependencies": {

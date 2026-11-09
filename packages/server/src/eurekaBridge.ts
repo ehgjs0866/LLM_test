@@ -299,7 +299,7 @@ export class EurekaBridge {
     const st = await this.d.eureka.getTaskState({ itemId: t.itemId }, c);
     if (!st.ok) return fromError(a.operationId, st.result.error, `'${t.name}' 업무 상태를 확인하지 못했어요.`);
     const s = st.data!;
-    const due = t.dueAtMs !== undefined ? ` 마감은 ${formatKoreanDateTime(new Date(t.dueAtMs).toISOString(), this.tz)}이에요.` : '';
+    const due = t.dueAtMs !== undefined ? ` 마감은 ${copula(formatKoreanDateTime(new Date(t.dueAtMs).toISOString(), this.tz))}.` : '';
     return {
       operationId: a.operationId,
       status: 'succeeded',
@@ -508,6 +508,12 @@ export class EurekaBridge {
 }
 
 /** 받침에 맞춰 '로'/'으로'를 붙인다 (ㄹ 받침은 '로') */
+/** 이에요/예요: 받침이 있으면 '이에요' (예: 9시예요, 30분이에요) */
+function copula(word: string): string {
+  const c = word.charCodeAt(word.length - 1) - 0xac00;
+  return `${word}${c >= 0 && c <= 11171 && c % 28 !== 0 ? '이에요' : '예요'}`;
+}
+
 function ro(word: string): string {
   const c = word.charCodeAt(word.length - 1) - 0xac00;
   if (c < 0 || c > 11171) return `${word}로`;
