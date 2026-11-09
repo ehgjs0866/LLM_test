@@ -126,7 +126,7 @@ const store = openStore();
 // 자원별 동시 호출 상한 (D-24). 자리가 없으면 그 호출의 남은 시간 안에서 기다리고, 그래도 없으면 보내지 않음(not_sent)
 const githubLimiter = new ConcurrencyLimiter('github', positive(env['GITHUB_MAX_CONCURRENT'], 4));
 const eurekaLimiter = new ConcurrencyLimiter('eureka', positive(env['EUREKA_MAX_CONCURRENT'], 4));
-// POC 장애 주입 (D-27): --poc 플래그 + DESKPET_POC_FAULTS + flw-d1일 때만 (scripts/poc-faults.ts)
+// POC 장애 주입 (D-27): --poc 플래그 + DESKPET_POC_FAULTS + flw-d1·flw-v1일 때만 (scripts/poc-faults.ts)
 const poc = (() => {
   try {
     return pocSetup(env, process.argv, (l) => console.log(l));

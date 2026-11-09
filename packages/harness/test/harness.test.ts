@@ -22,6 +22,11 @@ describe('input policy', () => {
     expect(classifyAnswer(voiceTurn('t', '반영해'), DEFAULT_POLICY).verdict).toBe('approved');
     expect(classifyAnswer(voiceTurn('t', 'Eureka에도 반영해 줘'), DEFAULT_POLICY).verdict).toBe('approved');
     expect(classifyAnswer(voiceTurn('t', '반영하지 마'), DEFAULT_POLICY).verdict).toBe('rejected');
+    // 2026-11-09 시험 사고: "거절"·영문 자판 오타가 승인으로 처리됨
+    expect(classifyAnswer(voiceTurn('t', '거절'), DEFAULT_POLICY).verdict).toBe('rejected');
+    expect(classifyAnswer(voiceTurn('t', '거절', { intention: 'confirm.approve' }), DEFAULT_POLICY).verdict).toBe('rejected');
+    expect(classifyAnswer(voiceTurn('t', 'rjwjf', { intention: 'confirm.approve' }), DEFAULT_POLICY).verdict).toBe('unclear');
+    expect(classifyAnswer(voiceTurn('t', '응', { intention: 'confirm.approve' }), DEFAULT_POLICY).verdict).toBe('approved');
     expect(classifyAnswer(voiceTurn('t', '응 승인해', { stt: 0.4 }), DEFAULT_POLICY).verdict).toBe('unclear');
   });
 });

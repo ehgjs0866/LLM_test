@@ -9,7 +9,7 @@
  *   pnpm eureka:fields 1000020 --notes     # 그 업무 단계 기록(note)의 본문을 찾는다. 문서에 없는 경로를 GET으로만 시도
  *   pnpm eureka:fields --notes 1000196     # 단계의 기록(note) 본문을 읽는 경로를 찾는다 (후보 GET 경로를 차례로 시도)
  *
- * - 개발 환경(flw-d1)만 허용한다. 키 값은 출력하지 않는다.
+ * - Eureka 개발판(flw-d1)·운영판(flw-v1) 주소에서 실행한다 (사용자 결정 2026-11-03: 두 환경 같게). GET만 보낸다. 키 값은 출력하지 않는다.
  * - 조회: GET items/0/list?detail=true, GET items/{id}, GET items/{id}/status, GET processes/0/list?detail=true
  */
 try {
@@ -23,8 +23,8 @@ if (!key) {
   console.log('✗ EUREKA_API_KEY가 비어 있어요');
   process.exit(1);
 }
-if (!base.endsWith('/flw-d1')) {
-  console.log(`✗ 개발 환경(flw-d1)에서만 실행해요. 지금 base URL: ${base}`);
+if (!/\/flw-[dv]1$/.test(base)) {
+  console.log(`✗ Eureka 개발판(flw-d1)·운영판(flw-v1) 주소에서만 실행해요. 지금 base URL: ${base}`);
   process.exit(1);
 }
 const itemId = process.argv.slice(2).find((a, i, all) => !a.startsWith('--') && all[i - 1] !== '--notes');

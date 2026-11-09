@@ -76,6 +76,13 @@ function decision(intention: string, heads: Record<string, unknown> = {}, resolv
   };
 }
 
+/** 확인 답변 판정 (Harness inputPolicy와 같은 말 목록). 거절 말이 먼저, 승인 말이 없으면 unclear */
+const REJECT_WORDS = /(아니|안\s*돼|안\s*해|취소|보류|거절|거부|하지\s*마|하지\s*말|싫어|그만|nope|\bno\b|cancel|reject)/i;
+const APPROVE_WORDS = /(^|\s)(응|네|예|그래|좋아|맞아|ㅇㅇ|승인|완료해|진행해|반영해|yes|ok|okay)/i;
+function answerVerdict(text: string): 'approve' | 'reject' | 'unclear' {
+  return REJECT_WORDS.test(text) ? 'reject' : APPROVE_WORDS.test(text) ? 'approve' : 'unclear';
+}
+
 async function ask(q: string): Promise<string | undefined> {
   const preset = valueOf('--answer');
   if (preset !== undefined) {
@@ -164,10 +171,11 @@ async function harness() {
     if (!ev.applied) fail(`질문 전달 보고가 반영되지 않았어요: ${ev.reason}`);
     const text = await ask('답변을 입력하세요 (예: 응, 승인해 / 아니, 보류해). 빈 입력이면 종료합니다.');
     if (!text) return console.log('\n답변 없이 종료합니다. 대기 중인 질문은 실행되지 않습니다.');
-    const approve = !/(아니|보류|취소|싫어)/.test(text);
-    // 라우터가 승인 답변으로 판단했다고 흉내 낸다 (거절이면 mutationApproved=false)
-    r = await run(approveId, text, approve ? 'confirm.approve' : 'confirm.reject', approve);
-    show(`${step}) harness.run — 답변 (mutationApproved=${approve})`, r);
+    // 라우터 흉내: 승인 말이 있을 때만 승인, 거절 말이면 거절, 그 밖(오타·잡음)은 unclear (2026-11-09 시험 사고 뒤 수정)
+    const v = answerVerdict(text);
+    const approve = v === 'approve';
+    r = await run(approveId, text, v === 'approve' ? 'confirm.approve' : v === 'reject' ? 'confirm.reject' : 'unclear', approve);
+    show(`${step}) harness.run — 답변 (${v}, mutationApproved=${approve})`, r);
   }
 }
 

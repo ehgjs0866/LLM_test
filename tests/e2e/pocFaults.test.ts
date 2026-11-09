@@ -21,9 +21,11 @@ const env = (faults: string, extra: Record<string, string> = {}) => ({ DESKPET_P
 const quiet = () => undefined;
 
 describe('POC 장애 주입 켜는 조건', () => {
-  it('--poc가 없거나 flw-d1이 아니거나 항목이 없으면 아무것도 하지 않는다. 모르는 이름은 시작 거부', () => {
+  it('--poc가 없거나 flw-d1·flw-v1이 아니거나 항목이 없으면 아무것도 하지 않는다. 모르는 이름은 시작 거부', () => {
     expect(pocSetup(env('sensor_fail_once'), [], quiet)).toMatchObject({ enabled: false });
-    expect(pocSetup(env('sensor_fail_once', { EUREKA_BASE_URL: 'https://api.eureka.codes/flw-v1' }), ['--poc'], quiet)).toMatchObject({ enabled: false });
+    expect(pocSetup(env('sensor_fail_once', { EUREKA_BASE_URL: 'https://api.eureka.codes/other' }), ['--poc'], quiet)).toMatchObject({ enabled: false });
+    // 운영판 flw-v1도 개발판과 같게 허용 (사용자 결정 2026-11-03)
+    expect(pocSetup(env('sensor_fail_once', { EUREKA_BASE_URL: 'https://api.eureka.codes/flw-v1' }), ['--poc'], quiet)).toMatchObject({ enabled: true });
     expect(pocSetup(env(''), ['--poc'], quiet)).toMatchObject({ enabled: false });
     expect(() => pocSetup(env('boom'), ['--poc'], quiet)).toThrow(/알 수 없는/);
     expect(pocSetup(env('sensor_fail_once'), ['--poc'], quiet)).toMatchObject({ enabled: true, faults: ['sensor_fail_once'] });

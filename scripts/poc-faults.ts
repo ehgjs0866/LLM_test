@@ -5,7 +5,7 @@
  *   pnpm harness --allow-github-writes --allow-eureka-writes --poc
  *   .env  DESKPET_POC_FAULTS=eureka_stage_slow,eureka_stage_fail_once,github_approve_drop_once,sensor_fail_once
  *
- * 켜는 조건: --poc 플래그 + DESKPET_POC_FAULTS + Eureka 개발 환경(flw-d1). 하나라도 없으면 아무것도 주입하지 않는다.
+ * 켜는 조건: --poc 플래그 + DESKPET_POC_FAULTS + Eureka 개발판(flw-d1)·운영판(flw-v1). 하나라도 없으면 아무것도 주입하지 않는다.
  *
  * | 이름 | 하는 일 | 확인할 시나리오 |
  * | eureka_stage_slow | 단계 완료 요청을 DESKPET_POC_SLOW_MS(기본 5000)만큼 늦게 보낸다 (매번) | D-23 '진행 중' 응답 → 알림 |
@@ -38,7 +38,7 @@ export function pocSetup(env: Record<string, string | undefined>, argv: string[]
     return { enabled: false, faults: [], banner: requested.length ? ['POC 장애 주입: 꺼짐 (DESKPET_POC_FAULTS가 있지만 --poc 플래그가 없음)'] : [] };
   }
   const base = (env['EUREKA_BASE_URL'] || 'https://api.eureka.codes/flw-d1').replace(/\/$/, '');
-  if (!base.endsWith('/flw-d1')) return { enabled: false, faults: [], banner: ['POC 장애 주입: 거부 (Eureka 개발 환경 flw-d1에서만)'] };
+  if (!/\/flw-[dv]1$/.test(base)) return { enabled: false, faults: [], banner: ['POC 장애 주입: 거부 (Eureka 개발판 flw-d1·운영판 flw-v1에서만)'] };
   const unknown = requested.filter((x) => !(POC_FAULTS as readonly string[]).includes(x));
   if (unknown.length) throw new Error(`알 수 없는 DESKPET_POC_FAULTS: ${unknown.join(', ')} (가능: ${POC_FAULTS.join(', ')})`);
   const faults = requested as Fault[];
